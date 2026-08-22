@@ -1,1 +1,4 @@
 Backend/app.py
+Backend/venv
+Backend/.env
+
