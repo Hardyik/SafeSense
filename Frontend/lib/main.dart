@@ -1,7 +1,251 @@
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:image_picker/image_picker.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 void main() {
   runApp(const SafeSenseApp());
+}
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+
+const Color kPrimary = Color(0xFF087F8C);
+const Color kPrimaryDark = Color(0xFF065F68);
+const Color kPrimaryLight = Color(0xFFB2EBF2);
+const Color kDanger = Color(0xFFE53935);
+const Color kWarning = Color(0xFFFF9800);
+const Color kSafe = Color(0xFF43A047);
+const Color kBg = Color(0xFFF4F6F9);
+
+// ============================================================
+// API SERVICE
+// ============================================================
+
+class ApiService {
+  static const String baseUrl = 'http://localhost:5000';
+  // For Android emulator: 'http://10.0.2.2:5000'
+  // For physical device: 'http://192.168.X.X:5000'
+
+  static String? _authToken;
+
+  static void setToken(String? token) {
+    _authToken = token;
+  }
+
+  static String? get token => _authToken;
+
+  static Map<String, String> _authHeaders() {
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+    };
+    if (_authToken != null) {
+      headers['Authorization'] = 'Bearer $_authToken';
+    }
+    return headers;
+  }
+
+  static Map<String, String> _multipartHeaders() {
+    final headers = <String, String>{};
+    if (_authToken != null) {
+      headers['Authorization'] = 'Bearer $_authToken';
+    }
+    return headers;
+  }
+
+  // Login
+  static Future<Map<String, dynamic>> login(
+      String email, String password) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/api/auth/login'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'email': email, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['token'] != null) {
+          _authToken = data['token'];
+        }
+        return data;
+      } else {
+        return {
+          'status': 'error',
+          'error': 'Login failed: ${response.statusCode}'
+        };
+      }
+    } catch (e) {
+      return {'status': 'error', 'error': 'Network error: $e'};
+    }
+  }
+
+  // Register
+  static Future<Map<String, dynamic>> register({
+    required String email,
+    required String password,
+    required String name,
+    String? phone,
+  }) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/api/auth/register'),
+            headers: _authHeaders(),
+            body: jsonEncode({
+              'email': email,
+              'password': password,
+              'name': name,
+              'phone': phone ?? '',
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 201 || response.statusCode == 200) {
+        return jsonDecode(response.body);
+      } else {
+        return {'status': 'error', 'error': 'Registration failed'};
+      }
+    } catch (e) {
+      return {'status': 'error', 'error': 'Network error: $e'};
+    }
+  }
+
+  // Upload report with image
+  static Future<Map<String, dynamic>> uploadReport({
+    required Uint8List imageBytes,
+    required String fileName,
+    required double latitude,
+    required double longitude,
+    int? userId,
+    String? description,
+  }) async {
+    try {
+      final uri = Uri.parse('$baseUrl/api/reports/upload');
+      final request = http.MultipartRequest('POST', uri);
+      request.headers.addAll(_multipartHeaders());
+
+      request.files.add(
+        http.MultipartFile.fromBytes('image', imageBytes, filename: fileName),
+      );
+
+      request.fields['latitude'] = latitude.toString();
+      request.fields['longitude'] = longitude.toString();
+
+      if (userId != null && userId > 0) {
+        request.fields['user_id'] = userId.toString();
+      }
+
+      if (description != null && description.isNotEmpty) {
+        request.fields['description'] = description;
+      }
+
+      final response =
+          await request.send().timeout(const Duration(seconds: 30));
+      final body = await response.stream.bytesToString();
+
+      if (response.statusCode == 201 || response.statusCode == 200) {
+        return jsonDecode(body);
+      } else {
+        return {'status': 'error', 'error': 'Upload failed'};
+      }
+    } catch (e) {
+      return {'status': 'error', 'error': 'Network error: $e'};
+    }
+  }
+
+  // Get all hazards
+  static Future<List<dynamic>> getHazards() async {
+    try {
+      final response = await http
+          .get(Uri.parse('$baseUrl/api/reports/hazards'))
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['hazards'] as List<dynamic>? ?? [];
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Get nearby hazards
+  static Future<List<dynamic>> getNearbyHazards(
+    double latitude,
+    double longitude, {
+    double radiusKm = 5,
+  }) async {
+    try {
+      final response = await http
+          .get(Uri.parse(
+              '$baseUrl/api/reports/nearby?lat=$latitude&lng=$longitude&radius=$radiusKm'))
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['nearby_hazards'] as List<dynamic>? ?? [];
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Get nearest shelter
+  static Future<Map<String, dynamic>> getNearestShelter(
+    double latitude,
+    double longitude,
+  ) async {
+    try {
+      final response = await http
+          .get(Uri.parse(
+              '$baseUrl/api/shelters/nearest?lat=$latitude&lng=$longitude'))
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['nearest_shelter'] as Map<String, dynamic>? ?? {};
+      }
+      return {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // Get user reports count
+  static Future<int> getUserReportCount(int userId) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/api/reports/user/$userId'),
+            headers: _authHeaders(),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return (data['reports'] as List<dynamic>?)?.length ?? 0;
+      }
+      return 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  // Logout (clear token)
+  static void logout() {
+    _authToken = null;
+  }
 }
 
 // ============================================================
@@ -18,10 +262,64 @@ class SafeSenseApp extends StatelessWidget {
       title: 'SafeSense',
       theme: ThemeData(
         useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFFF6F8FA),
+        scaffoldBackgroundColor: kBg,
         fontFamily: 'Roboto',
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF087F8C),
+          seedColor: kPrimary,
+          brightness: Brightness.light,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black87,
+          elevation: 0,
+          centerTitle: true,
+          surfaceTintColor: Colors.transparent,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: kPrimary,
+            foregroundColor: Colors.white,
+            elevation: 0,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: kPrimary,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            side: const BorderSide(color: kPrimary),
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade300),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade300),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: kPrimary, width: 2),
+          ),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        ),
+        cardTheme: CardThemeData(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: Colors.grey.shade200),
+          ),
         ),
       ),
       home: const LoginPage(),
@@ -46,6 +344,7 @@ class _LoginPageState extends State<LoginPage> {
 
   bool showPassword = false;
   bool loading = false;
+  String? errorMessage;
 
   @override
   void dispose() {
@@ -55,337 +354,237 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   void login() async {
+    setState(() => errorMessage = null);
+
     final email = emailController.text.trim();
     final password = passwordController.text;
 
     if (email.isEmpty || password.isEmpty) {
-      _showMessage('Please enter your email and password');
+      setState(() => errorMessage = 'Please enter email and password');
       return;
     }
 
     if (!email.contains('@')) {
-      _showMessage('Please enter a valid email address');
+      setState(() => errorMessage = 'Please enter a valid email');
       return;
     }
 
-    setState(() {
-      loading = true;
-    });
+    setState(() => loading = true);
 
-    await Future.delayed(const Duration(milliseconds: 700));
+    final result = await ApiService.login(email, password);
+
+    setState(() => loading = false);
 
     if (!mounted) return;
 
-    setState(() {
-      loading = false;
-    });
-
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) => const HomePage(),
-      ),
-    );
-  }
-
-  void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    if (result['status'] == 'success' && result['user'] != null) {
+      int userId = result['user']['id'];
+      if (result['token'] != null) {
+        ApiService.setToken(result['token']);
+      }
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => HomePage(
+              userId: userId, userName: result['user']['name'] ?? 'User'),
+        ),
+      );
+    } else {
+      setState(() => errorMessage = result['error'] ?? 'Login failed');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F8FA),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SizedBox(height: 35),
-
-              // Logo
-              Center(
-                child: Container(
-                  width: 82,
-                  height: 82,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF087F8C),
-                    borderRadius: BorderRadius.circular(27),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF087F8C).withOpacity(0.25),
-                        blurRadius: 20,
-                        offset: const Offset(0, 10),
-                      ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.shield_rounded,
-                    color: Colors.white,
-                    size: 45,
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 25),
-
-              const Center(
-                child: Text(
-                  'SafeSense',
-                  style: TextStyle(
-                    fontSize: 30,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF172126),
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 7),
-
-              const Center(
-                child: Text(
-                  'Your safety. Our priority.',
-                  style: TextStyle(
-                    color: Colors.grey,
-                    fontSize: 14,
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 45),
-
-              const Text(
-                'Welcome back',
-                style: TextStyle(
-                  fontSize: 30,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF172126),
-                ),
-              ),
-
-              const SizedBox(height: 7),
-
-              const Text(
-                'Sign in to continue to your safety dashboard.',
-                style: TextStyle(
-                  color: Colors.grey,
-                  fontSize: 14,
-                ),
-              ),
-
-              const SizedBox(height: 30),
-
-              // Email
-              _inputField(
-                controller: emailController,
-                label: 'Email address',
-                hint: 'example@email.com',
-                icon: Icons.email_outlined,
-                keyboardType: TextInputType.emailAddress,
-              ),
-
-              const SizedBox(height: 16),
-
-              // Password
-              _inputField(
-                controller: passwordController,
-                label: 'Password',
-                hint: 'Enter your password',
-                icon: Icons.lock_outline_rounded,
-                obscureText: !showPassword,
-                suffixIcon: IconButton(
-                  onPressed: () {
-                    setState(() {
-                      showPassword = !showPassword;
-                    });
-                  },
-                  icon: Icon(
-                    showPassword
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    color: Colors.grey,
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 10),
-
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: () {
-                    _showMessage(
-                      'Password reset will be available soon',
-                    );
-                  },
-                  child: const Text(
-                    'Forgot password?',
-                    style: TextStyle(
-                      color: Color(0xFF087F8C),
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 15),
-
-              // Login button
-              SizedBox(
+              // Hero Section
+              Container(
                 width: double.infinity,
-                height: 56,
-                child: ElevatedButton(
-                  onPressed: loading ? null : login,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF087F8C),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(17),
-                    ),
+                padding: const EdgeInsets.fromLTRB(24, 60, 24, 40),
+                decoration: const BoxDecoration(
+                  color: kPrimary,
+                  borderRadius: BorderRadius.only(
+                    bottomLeft: Radius.circular(32),
+                    bottomRight: Radius.circular(32),
                   ),
-                  child: loading
-                      ? const SizedBox(
-                          width: 23,
-                          height: 23,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.5,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text(
-                          'Sign In',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
                 ),
-              ),
-
-              const SizedBox(height: 25),
-
-              // Divider
-              Row(
-                children: [
-                  Expanded(
-                    child: Divider(
-                      color: Colors.grey.shade300,
+                child: Column(
+                  children: [
+                    Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.shield_outlined,
+                        size: 40,
+                        color: Colors.white,
+                      ),
                     ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 12),
-                    child: Text(
-                      'OR',
+                    const SizedBox(height: 16),
+                    const Text(
+                      'SafeSense',
                       style: TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
                       ),
                     ),
-                  ),
-                  Expanded(
-                    child: Divider(
-                      color: Colors.grey.shade300,
-                    ),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 25),
-
-              // Register
-              SizedBox(
-                width: double.infinity,
-                height: 54,
-                child: OutlinedButton(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const RegisterPage(),
+                    const SizedBox(height: 6),
+                    Text(
+                      'See the hazard. Find the safe way.',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.white.withOpacity(0.85),
                       ),
-                    );
-                  },
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFF087F8C),
-                    side: const BorderSide(
-                      color: Color(0xFF087F8C),
                     ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(17),
-                    ),
-                  ),
-                  child: const Text(
-                    'Create New Account',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
+                  ],
                 ),
               ),
 
-              const SizedBox(height: 25),
-
-              const Center(
-                child: Text(
-                  'By continuing, you agree to our Terms & Privacy Policy.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.grey,
-                    fontSize: 11,
-                  ),
+              // Form Section
+              Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (errorMessage != null) ...[
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: kDanger.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: kDanger.withOpacity(0.3)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.error_outline,
+                                color: kDanger, size: 20),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                errorMessage!,
+                                style: const TextStyle(color: kDanger),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+                    const Text(
+                      'Email',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: emailController,
+                      keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      decoration: const InputDecoration(
+                        hintText: 'you@example.com',
+                        prefixIcon: Icon(Icons.email_outlined),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Password',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: passwordController,
+                      obscureText: !showPassword,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => login(),
+                      decoration: InputDecoration(
+                        hintText: 'Enter your password',
+                        prefixIcon: const Icon(Icons.lock_outline),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            showPassword
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined,
+                          ),
+                          onPressed: () =>
+                              setState(() => showPassword = !showPassword),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: loading ? null : login,
+                        child: loading
+                            ? const SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Text(
+                                'Log in',
+                                style: TextStyle(
+                                    fontSize: 16, fontWeight: FontWeight.w600),
+                              ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  const HomePage(userId: 0, userName: 'Guest'),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.explore_outlined),
+                        label: const Text('Continue as guest'),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    Center(
+                      child: Text.rich(
+                        TextSpan(
+                          text: "Don't have an account? ",
+                          style: const TextStyle(color: Colors.grey),
+                          children: [
+                            TextSpan(
+                              text: 'Sign up',
+                              style: TextStyle(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .primary,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _inputField({
-    required TextEditingController controller,
-    required String label,
-    required String hint,
-    required IconData icon,
-    TextInputType? keyboardType,
-    bool obscureText = false,
-    Widget? suffixIcon,
-  }) {
-    return TextField(
-      controller: controller,
-      obscureText: obscureText,
-      keyboardType: keyboardType,
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        prefixIcon: Icon(
-          icon,
-          color: const Color(0xFF087F8C),
-        ),
-        suffixIcon: suffixIcon,
-        filled: true,
-        fillColor: Colors.white,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(17),
-          borderSide: BorderSide.none,
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(17),
-          borderSide: BorderSide(
-            color: Colors.grey.shade200,
-          ),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(17),
-          borderSide: const BorderSide(
-            color: Color(0xFF087F8C),
-            width: 1.5,
           ),
         ),
       ),
@@ -407,295 +606,229 @@ class RegisterPage extends StatefulWidget {
 class _RegisterPageState extends State<RegisterPage> {
   final nameController = TextEditingController();
   final emailController = TextEditingController();
-  final phoneController = TextEditingController();
   final passwordController = TextEditingController();
-  final confirmPasswordController = TextEditingController();
+  final phoneController = TextEditingController();
 
   bool showPassword = false;
-  bool showConfirmPassword = false;
   bool loading = false;
+  String? errorMessage;
+  String? successMessage;
 
   @override
   void dispose() {
     nameController.dispose();
     emailController.dispose();
-    phoneController.dispose();
     passwordController.dispose();
-    confirmPasswordController.dispose();
+    phoneController.dispose();
     super.dispose();
   }
 
   void register() async {
+    setState(() {
+      errorMessage = null;
+      successMessage = null;
+    });
+
     final name = nameController.text.trim();
     final email = emailController.text.trim();
-    final phone = phoneController.text.trim();
     final password = passwordController.text;
-    final confirmPassword = confirmPasswordController.text;
+    final phone = phoneController.text.trim();
 
-    if (name.isEmpty ||
-        email.isEmpty ||
-        phone.isEmpty ||
-        password.isEmpty ||
-        confirmPassword.isEmpty) {
-      _showMessage('Please fill in all fields');
+    if (name.isEmpty || email.isEmpty || password.isEmpty) {
+      setState(() => errorMessage = 'Please fill all required fields');
       return;
     }
 
     if (!email.contains('@')) {
-      _showMessage('Please enter a valid email address');
-      return;
-    }
-
-    if (phone.length < 8) {
-      _showMessage('Please enter a valid phone number');
+      setState(() => errorMessage = 'Please enter a valid email');
       return;
     }
 
     if (password.length < 6) {
-      _showMessage(
-        'Password must contain at least 6 characters',
-      );
+      setState(
+          () => errorMessage = 'Password must be at least 6 characters');
       return;
     }
 
-    if (password != confirmPassword) {
-      _showMessage('Passwords do not match');
-      return;
-    }
+    setState(() => loading = true);
 
-    setState(() {
-      loading = true;
-    });
-
-    await Future.delayed(
-      const Duration(milliseconds: 800),
+    final result = await ApiService.register(
+      email: email,
+      password: password,
+      name: name,
+      phone: phone,
     );
+
+    setState(() => loading = false);
 
     if (!mounted) return;
 
-    setState(() {
-      loading = false;
-    });
-
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Account Created'),
-          content: Text(
-            'Welcome to SafeSense, $name!',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.pop(context);
-              },
-              child: const Text(
-                'Continue to Login',
-                style: TextStyle(
-                  color: Color(0xFF087F8C),
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    if (result['status'] == 'success') {
+      setState(
+          () => successMessage = 'Account created! Redirecting to login...');
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) Navigator.pop(context);
+    } else {
+      setState(() => errorMessage = result['error'] ?? 'Registration failed');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F8FA),
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
         leading: IconButton(
-          icon: const Icon(
-            Icons.arrow_back_rounded,
-            color: Color(0xFF172126),
-          ),
-          onPressed: () {
-            Navigator.pop(context);
-          },
+          icon: const Icon(Icons.arrow_back_ios_new, size: 20),
+          onPressed: () => Navigator.pop(context),
         ),
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            24,
-            10,
-            24,
-            30,
-          ),
+          padding: const EdgeInsets.all(24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'Create account',
-                style: TextStyle(
-                  fontSize: 31,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF172126),
-                ),
+              Text(
+                'Create Account',
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
-
+              const SizedBox(height: 6),
+              Text(
+                'Join SafeSense to report and help others',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Colors.grey,
+                    ),
+              ),
+              const SizedBox(height: 28),
+              if (errorMessage != null) ...[
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: kDanger.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: kDanger.withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline,
+                          color: kDanger, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(errorMessage!,
+                            style: const TextStyle(color: kDanger)),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (successMessage != null) ...[
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: kSafe.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: kSafe.withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.check_circle_outline,
+                          color: kSafe, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(successMessage!,
+                            style: const TextStyle(color: kSafe)),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+              const Text('Full Name',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600, color: Colors.black87)),
               const SizedBox(height: 8),
-
-              const Text(
-                'Create your SafeSense account to access safety services.',
-                style: TextStyle(
-                  color: Colors.grey,
-                  fontSize: 14,
-                ),
-              ),
-
-              const SizedBox(height: 30),
-
-              // Name
-              _registerField(
+              TextField(
                 controller: nameController,
-                label: 'Full name',
-                hint: 'Enter your full name',
-                icon: Icons.person_outline_rounded,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  hintText: 'John Doe',
+                  prefixIcon: Icon(Icons.person_outline),
+                ),
               ),
-
-              const SizedBox(height: 15),
-
-              // Email
-              _registerField(
+              const SizedBox(height: 16),
+              const Text('Email',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600, color: Colors.black87)),
+              const SizedBox(height: 8),
+              TextField(
                 controller: emailController,
-                label: 'Email address',
-                hint: 'example@email.com',
-                icon: Icons.email_outlined,
                 keyboardType: TextInputType.emailAddress,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  hintText: 'you@example.com',
+                  prefixIcon: Icon(Icons.email_outlined),
+                ),
               ),
-
-              const SizedBox(height: 15),
-
-              // Phone
-              _registerField(
+              const SizedBox(height: 16),
+              const Text('Phone (optional)',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600, color: Colors.black87)),
+              const SizedBox(height: 8),
+              TextField(
                 controller: phoneController,
-                label: 'Phone number',
-                hint: 'Enter your phone number',
-                icon: Icons.phone_outlined,
                 keyboardType: TextInputType.phone,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  hintText: '9876543210',
+                  prefixIcon: Icon(Icons.phone_outlined),
+                ),
               ),
-
-              const SizedBox(height: 15),
-
-              // Password
-              _registerField(
+              const SizedBox(height: 16),
+              const Text('Password',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600, color: Colors.black87)),
+              const SizedBox(height: 8),
+              TextField(
                 controller: passwordController,
-                label: 'Password',
-                hint: 'Create a password',
-                icon: Icons.lock_outline_rounded,
                 obscureText: !showPassword,
-                suffixIcon: IconButton(
-                  onPressed: () {
-                    setState(() {
-                      showPassword = !showPassword;
-                    });
-                  },
-                  icon: Icon(
-                    showPassword
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    color: Colors.grey,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => register(),
+                decoration: InputDecoration(
+                  hintText: 'At least 6 characters',
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      showPassword
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined,
+                    ),
+                    onPressed: () =>
+                        setState(() => showPassword = !showPassword),
                   ),
                 ),
               ),
-
-              const SizedBox(height: 15),
-
-              // Confirm password
-              _registerField(
-                controller: confirmPasswordController,
-                label: 'Confirm password',
-                hint: 'Enter password again',
-                icon: Icons.lock_outline_rounded,
-                obscureText: !showConfirmPassword,
-                suffixIcon: IconButton(
-                  onPressed: () {
-                    setState(() {
-                      showConfirmPassword = !showConfirmPassword;
-                    });
-                  },
-                  icon: Icon(
-                    showConfirmPassword
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    color: Colors.grey,
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 25),
-
-              // Register button
+              const SizedBox(height: 28),
               SizedBox(
                 width: double.infinity,
-                height: 56,
                 child: ElevatedButton(
                   onPressed: loading ? null : register,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF087F8C),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(17),
-                    ),
-                  ),
                   child: loading
                       ? const SizedBox(
-                          width: 23,
-                          height: 23,
+                          height: 20,
+                          width: 20,
                           child: CircularProgressIndicator(
-                            strokeWidth: 2.5,
+                            strokeWidth: 2,
                             color: Colors.white,
                           ),
                         )
                       : const Text(
                           'Create Account',
                           style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                          ),
+                              fontSize: 16, fontWeight: FontWeight.w600),
                         ),
-                ),
-              ),
-
-              const SizedBox(height: 22),
-
-              Center(
-                child: TextButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                  },
-                  child: const Text.rich(
-                    TextSpan(
-                      text: 'Already have an account? ',
-                      style: TextStyle(
-                        color: Colors.grey,
-                      ),
-                      children: [
-                        TextSpan(
-                          text: 'Sign in',
-                          style: TextStyle(
-                            color: Color(0xFF087F8C),
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
                 ),
               ),
             ],
@@ -704,174 +837,890 @@ class _RegisterPageState extends State<RegisterPage> {
       ),
     );
   }
-
-  Widget _registerField({
-    required TextEditingController controller,
-    required String label,
-    required String hint,
-    required IconData icon,
-    TextInputType? keyboardType,
-    bool obscureText = false,
-    Widget? suffixIcon,
-  }) {
-    return TextField(
-      controller: controller,
-      obscureText: obscureText,
-      keyboardType: keyboardType,
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        prefixIcon: Icon(
-          icon,
-          color: const Color(0xFF087F8C),
-        ),
-        suffixIcon: suffixIcon,
-        filled: true,
-        fillColor: Colors.white,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(17),
-          borderSide: BorderSide.none,
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(17),
-          borderSide: BorderSide(
-            color: Colors.grey.shade200,
-          ),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(17),
-          borderSide: const BorderSide(
-            color: Color(0xFF087F8C),
-            width: 1.5,
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ============================================================
-// HOME PAGE
+// HOME PAGE (Bottom Nav Shell)
 // ============================================================
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  final int userId;
+  final String userName;
+  const HomePage({super.key, required this.userId, required this.userName});
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
-  int selectedIndex = 0;
+  int _currentIndex = 0;
 
-  static const Color primary = Color(0xFF087F8C);
-  static const Color dark = Color(0xFF172126);
-  static const Color background = Color(0xFFF6F8FA);
+  @override
+  Widget build(BuildContext context) {
+    final isGuest = widget.userId == 0;
+
+    // Build page list — guests skip upload (index 1)
+    final pages = <Widget>[
+      DashboardPage(userId: widget.userId, isGuest: isGuest),
+      if (!isGuest) UploadPage(userId: widget.userId),
+      MapPage(userId: widget.userId),
+      ProfilePage(userId: widget.userId, userName: widget.userName),
+    ];
+
+    // Clamp index if needed
+    if (_currentIndex >= pages.length) {
+      _currentIndex = 0;
+    }
+
+    return Scaffold(
+      body: pages[_currentIndex],
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (index) {
+          setState(() => _currentIndex = index);
+        },
+        backgroundColor: Colors.white,
+        surfaceTintColor: kPrimaryLight,
+        height: 64,
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+        destinations: [
+          const NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home, color: kPrimary),
+            label: 'Home',
+          ),
+          if (!isGuest)
+            const NavigationDestination(
+              icon: Icon(Icons.camera_alt_outlined),
+              selectedIcon: Icon(Icons.camera_alt, color: kPrimary),
+              label: 'Report',
+            ),
+          const NavigationDestination(
+            icon: Icon(Icons.map_outlined),
+            selectedIcon: Icon(Icons.map, color: kPrimary),
+            label: 'Map',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.person_outline),
+            selectedIcon: Icon(Icons.person, color: kPrimary),
+            label: 'Profile',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// DASHBOARD PAGE
+// ============================================================
+
+class DashboardPage extends StatefulWidget {
+  final int userId;
+  final bool isGuest;
+
+  const DashboardPage({super.key, required this.userId, required this.isGuest});
+
+  @override
+  State<DashboardPage> createState() => _DashboardPageState();
+}
+
+class _DashboardPageState extends State<DashboardPage> {
+  List<dynamic> nearbyHazards = [];
+  Map<String, dynamic> nearestShelter = {};
+  bool loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    setState(() => loading = true);
+    final hazards = await ApiService.getNearbyHazards(19.2456, 73.1300);
+    final shelter = await ApiService.getNearestShelter(19.2456, 73.1300);
+    if (mounted) {
+      setState(() {
+        nearbyHazards = hazards;
+        nearestShelter = shelter;
+        loading = false;
+      });
+    }
+  }
+
+  Color _hazardColor(String? level) {
+    switch (level) {
+      case 'danger':
+        return kDanger;
+      case 'moderate':
+        return kWarning;
+      case 'safe':
+        return kSafe;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  IconData _hazardIcon(String? type) {
+    switch (type) {
+      case 'flood':
+        return Icons.water;
+      case 'fire':
+        return Icons.local_fire_department;
+      case 'collapse':
+        return Icons.broken_image;
+      default:
+        return Icons.warning_amber_rounded;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final topAlert = nearbyHazards.isNotEmpty ? nearbyHazards.first : null;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.shield_outlined, color: kPrimary, size: 24),
+            SizedBox(width: 8),
+            Text(
+              'SafeSense',
+              style: TextStyle(
+                  fontWeight: FontWeight.bold, color: kPrimaryDark),
+            ),
+          ],
+        ),
+      ),
+      body: loading
+          ? const Center(child: CircularProgressIndicator(color: kPrimary))
+          : RefreshIndicator(
+              color: kPrimary,
+              onRefresh: _loadData,
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  // Guest banner
+                  if (widget.isGuest)
+                    _infoBanner(
+                      icon: Icons.info_outline,
+                      color: Colors.blue,
+                      message:
+                          'You are browsing as guest. Sign up to report hazards.',
+                    ),
+
+                  // Top danger alert (from real data)
+                  if (!widget.isGuest && topAlert != null)
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            _hazardColor(topAlert['hazard_level'])
+                                .withOpacity(0.15),
+                            _hazardColor(topAlert['hazard_level'])
+                                .withOpacity(0.05),
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: _hazardColor(topAlert['hazard_level'])
+                              .withOpacity(0.4),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: _hazardColor(topAlert['hazard_level'])
+                                  .withOpacity(0.2),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.warning_amber_rounded,
+                              color: _hazardColor(topAlert['hazard_level']),
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${(topAlert['damage_type'] ?? 'Hazard').toString().toUpperCase()} detected',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  topAlert['road_status'] ?? 'Check route',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Icon(
+                            Icons.chevron_right,
+                            color: Colors.grey.shade400,
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  const SizedBox(height: 24),
+
+                  // Section header: Nearby Hazards
+                  _sectionHeader('Nearby Hazards', '${nearbyHazards.length} active'),
+                  const SizedBox(height: 12),
+
+                  if (nearbyHazards.isEmpty)
+                    _emptyState(
+                      icon: Icons.check_circle_outline,
+                      message: 'No hazards nearby. You are safe!',
+                      color: kSafe,
+                    )
+                  else
+                    ...nearbyHazards.map((h) => Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  color: _hazardColor(h['hazard_level'])
+                                      .withOpacity(0.12),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(
+                                  _hazardIcon(h['damage_type']),
+                                  color: _hazardColor(h['hazard_level']),
+                                  size: 22,
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _capitalize(h['damage_type'] ?? 'Unknown'),
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      '${h['road_status'] ?? ''}  ·  ${(h['confidence'] * 100).toStringAsFixed(0)}% confidence',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.grey.shade500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              _levelBadge(h['hazard_level']),
+                            ],
+                          ),
+                        )),
+
+                  const SizedBox(height: 24),
+
+                  // Section header: Nearest Shelter
+                  _sectionHeader('Nearest Shelter', ''),
+                  const SizedBox(height: 12),
+
+                  if (nearestShelter.isEmpty)
+                    _emptyState(
+                      icon: Icons.home_work_outlined,
+                      message: 'No shelters found nearby',
+                      color: Colors.grey,
+                    )
+                  else
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.grey.shade200),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: kPrimaryLight.withOpacity(0.4),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(
+                              Icons.home_work_outlined,
+                              color: kPrimary,
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  nearestShelter['name'] ?? 'Unknown',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  '${(nearestShelter['distance_km'] ?? 0).toStringAsFixed(1)} km away',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: kPrimaryLight.withOpacity(0.3),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              nearestShelter['phone'] ?? 'N/A',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 12,
+                                color: kPrimaryDark,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  const SizedBox(height: 20),
+                ],
+              ),
+            ),
+    );
+  }
+
+  // --- Helpers ---
+
+  Widget _sectionHeader(String title, String subtitle) {
+    return Row(
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            color: Colors.black87,
+          ),
+        ),
+        if (subtitle.isNotEmpty) ...[
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: kPrimaryLight.withOpacity(0.5),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              subtitle,
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: kPrimaryDark,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _levelBadge(String? level) {
+    final color = _hazardColor(level);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        (level ?? 'unknown').toUpperCase(),
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          color: color,
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+
+  Widget _infoBanner({
+    required IconData icon,
+    required Color color,
+    required String message,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.2)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                  fontSize: 13, color: color.withOpacity(0.9)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyState({
+    required IconData icon,
+    required String message,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 32),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Center(
+        child: Column(
+          children: [
+            Icon(icon, size: 36, color: color.withOpacity(0.5)),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey.shade500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _capitalize(String s) {
+    if (s.isEmpty) return s;
+    return s[0].toUpperCase() + s.substring(1);
+  }
+}
+
+// ============================================================
+// UPLOAD PAGE
+// ============================================================
+
+class UploadPage extends StatefulWidget {
+  final int userId;
+  const UploadPage({super.key, required this.userId});
+
+  @override
+  State<UploadPage> createState() => _UploadPageState();
+}
+
+class _UploadPageState extends State<UploadPage> {
+  XFile? selectedImage;
+  Uint8List? _imageBytes;
+  bool loading = false;
+
+  final latController = TextEditingController(text: '19.9975');
+  final lngController = TextEditingController(text: '73.7898');
+  final notesController = TextEditingController();
+
+  @override
+  void dispose() {
+    latController.dispose();
+    lngController.dispose();
+    notesController.dispose();
+    super.dispose();
+  }
+
+  Future<void> pickImage(ImageSource source) async {
+    final picker = ImagePicker();
+    final image = await picker.pickImage(
+      source: source,
+      maxWidth: 1200,
+      maxHeight: 1200,
+      imageQuality: 85,
+    );
+    if (image != null) {
+      final bytes = await image.readAsBytes();
+      setState(() {
+        selectedImage = image;
+        _imageBytes = bytes;
+      });
+    }
+  }
+
+  Future<void> uploadReport() async {
+    if (selectedImage == null || _imageBytes == null) {
+      _showMessage('Please select an image first', isError: true);
+      return;
+    }
+
+    final lat = double.tryParse(latController.text);
+    final lng = double.tryParse(lngController.text);
+    if (lat == null || lng == null) {
+      _showMessage('Please enter valid coordinates', isError: true);
+      return;
+    }
+
+    setState(() => loading = true);
+
+    final result = await ApiService.uploadReport(
+      imageBytes: _imageBytes!,
+      fileName: selectedImage!.name,
+      latitude: lat,
+      longitude: lng,
+      userId: widget.userId,
+      description: notesController.text.trim().isNotEmpty ? notesController.text.trim() : null,
+    );
+
+    setState(() => loading = false);
+
+    if (!mounted) return;
+
+    if (result['status'] == 'success') {
+      setState(() {
+        selectedImage = null;
+        _imageBytes = null;
+      });
+      notesController.clear();
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ResultPage(analysis: result['analysis']),
+        ),
+      );
+    } else {
+      _showMessage(result['error'] ?? 'Upload failed', isError: true);
+    }
+  }
+
+  void _showMessage(String message, {bool isError = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Icon(
+              isError ? Icons.error_outline : Icons.check_circle_outline,
+              color: Colors.white,
+              size: 18,
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: isError ? kDanger : kSafe,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        margin: const EdgeInsets.all(12),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: background,
-      body: SafeArea(
-        child: IndexedStack(
-          index: selectedIndex,
-          children: const [
-            DashboardPage(),
-            MapPage(),
-            ReportsPage(),
-            ProfilePage(),
-          ],
-        ),
+      appBar: AppBar(
+        title: const Text('Report Hazard',
+            style: TextStyle(fontWeight: FontWeight.w600)),
       ),
-      bottomNavigationBar: _buildBottomNavigation(),
-    );
-  }
-
-  Widget _buildBottomNavigation() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.06),
-            blurRadius: 20,
-            offset: const Offset(0, -5),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        top: false,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: [
-            _navItem(
-              Icons.home_rounded,
-              'Home',
-              0,
-            ),
-            _navItem(
-              Icons.map_rounded,
-              'Map',
-              1,
-            ),
-            _navItem(
-              Icons.assignment_rounded,
-              'Reports',
-              2,
-            ),
-            _navItem(
-              Icons.person_rounded,
-              'Profile',
-              3,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _navItem(
-    IconData icon,
-    String title,
-    int index,
-  ) {
-    final selected = selectedIndex == index;
-
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          selectedIndex = index;
-        });
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        padding: const EdgeInsets.symmetric(
-          horizontal: 16,
-          vertical: 8,
-        ),
-        decoration: BoxDecoration(
-          color: selected ? primary.withOpacity(0.10) : Colors.transparent,
-          borderRadius: BorderRadius.circular(16),
-        ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              icon,
-              color: selected ? primary : Colors.grey.shade500,
-              size: 25,
+            // Image preview area
+            Expanded(
+              child: selectedImage == null
+                  ? GestureDetector(
+                      onTap: () => _showImageSourceDialog(),
+                      child: Container(
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: kPrimary.withOpacity(0.3),
+                            width: 2,
+                            style: BorderStyle.solid,
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 72,
+                              height: 72,
+                              decoration: BoxDecoration(
+                                color: kPrimary.withOpacity(0.1),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.add_a_photo_outlined,
+                                size: 36,
+                                color: kPrimary,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              'Tap to add a photo',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.black87,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'Take a photo or choose from gallery',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.grey.shade500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          // Show image from bytes (works on web + mobile)
+                          _imageBytes != null
+                              ? Image.memory(
+                                  _imageBytes!,
+                                  fit: BoxFit.cover,
+                                )
+                              : const Center(
+                                  child: CircularProgressIndicator(),
+                                ),
+                          // Remove button
+                          Positioned(
+                            top: 12,
+                            right: 12,
+                            child: GestureDetector(
+                              onTap: () => setState(() {
+                                selectedImage = null;
+                                _imageBytes = null;
+                              }),
+                              child: Container(
+                                padding: const EdgeInsets.all(6),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(0.6),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.close,
+                                  color: Colors.white,
+                                  size: 18,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
             ),
-            const SizedBox(height: 3),
-            Text(
-              title,
-              style: TextStyle(
-                color: selected ? primary : Colors.grey.shade600,
-                fontSize: 11,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            const SizedBox(height: 16),
+
+            // Action buttons
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => pickImage(ImageSource.camera),
+                    icon: const Icon(Icons.camera_alt_outlined),
+                    label: const Text('Camera'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => pickImage(ImageSource.gallery),
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: const Text('Gallery'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Editable coordinates
+            Row(
+              children: [
+                const Icon(Icons.location_on_outlined, color: kPrimary, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: latController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Latitude',
+                      hintText: '19.9975',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    controller: lngController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Longitude',
+                      hintText: '73.7898',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            // Additional info
+            TextField(
+              controller: notesController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Additional info (optional)',
+                hintText: 'e.g. Road near river bridge, water rising fast...',
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                prefixIcon: Padding(
+                  padding: EdgeInsets.only(left: 12, right: 8),
+                  child: Icon(Icons.notes_outlined, size: 18),
+                ),
+                prefixIconConstraints: BoxConstraints(minWidth: 0, minHeight: 0),
+              ),
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+
+            // Submit button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: loading ? null : uploadReport,
+                icon: loading
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.send_outlined),
+                label: Text(
+                  loading ? 'Analyzing...' : 'Analyze & Submit',
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600),
+                ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _showImageSourceDialog() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Add a photo',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 20),
+              ListTile(
+                leading: const Icon(Icons.camera_alt_outlined, color: kPrimary),
+                title: const Text('Take Photo'),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  pickImage(ImageSource.camera);
+                },
+              ),
+              ListTile(
+                leading:
+                    const Icon(Icons.photo_library_outlined, color: kPrimary),
+                title: const Text('Choose from Gallery'),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  pickImage(ImageSource.gallery);
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -879,433 +1728,148 @@ class _HomePageState extends State<HomePage> {
 }
 
 // ============================================================
-// DASHBOARD
+// RESULT PAGE
 // ============================================================
 
-class DashboardPage extends StatelessWidget {
-  const DashboardPage({super.key});
+class ResultPage extends StatelessWidget {
+  final Map<String, dynamic> analysis;
 
-  static const Color primary = Color(0xFF087F8C);
-  static const Color dark = Color(0xFF172126);
+  const ResultPage({super.key, required this.analysis});
+
+  Color _hazardColor(String? level) {
+    switch (level) {
+      case 'danger':
+        return kDanger;
+      case 'moderate':
+        return kWarning;
+      case 'safe':
+        return kSafe;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  IconData _hazardIcon(String? type) {
+    switch (type) {
+      case 'flood':
+        return Icons.water;
+      case 'fire':
+        return Icons.local_fire_department;
+      case 'collapse':
+        return Icons.broken_image;
+      default:
+        return Icons.warning_amber_rounded;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(
-        20,
-        18,
-        20,
-        30,
+    final hazardLevel = analysis['hazard_level'] ?? 'unknown';
+    final levelColor = _hazardColor(hazardLevel);
+    final damageType = analysis['damage_type'] ?? 'Unknown';
+    final confidence = analysis['confidence'] ?? 0;
+    final roadStatus = analysis['road_status'] ?? 'Unknown';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Analysis Result',
+            style: TextStyle(fontWeight: FontWeight.w600)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: const Icon(
-                  Icons.shield_rounded,
-                  color: primary,
-                  size: 28,
-                ),
-              ),
-              const SizedBox(width: 12),
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'SafeSense',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      color: dark,
-                    ),
-                  ),
-                  Text(
-                    'Safety dashboard',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey,
-                    ),
-                  ),
-                ],
-              ),
-              const Spacer(),
-              Container(
-                width: 45,
-                height: 45,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: const Icon(
-                  Icons.notifications_none_rounded,
-                  color: dark,
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 28),
-
-          const Text(
-            'Good morning 👋',
-            style: TextStyle(
-              fontSize: 15,
-              color: Colors.grey,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-
-          const SizedBox(height: 5),
-
-          const Text(
-            'Stay safe, stay informed.',
-            style: TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.w800,
-              color: dark,
-            ),
-          ),
-
-          const SizedBox(height: 22),
-
-          // Safety status
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [
-                  Color(0xFF087F8C),
-                  Color(0xFF0B6875),
-                ],
-              ),
-              borderRadius: BorderRadius.circular(25),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 58,
-                  height: 58,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.16),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.verified_user_rounded,
-                    color: Colors.white,
-                    size: 31,
-                  ),
-                ),
-                const SizedBox(width: 16),
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'You are currently safe',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      SizedBox(height: 5),
-                      Text(
-                        'No critical threats detected nearby.',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Text(
-                    'SAFE',
-                    style: TextStyle(
-                      color: primary,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 11,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 25),
-
-          const Text(
-            'Quick Actions',
-            style: TextStyle(
-              fontSize: 21,
-              fontWeight: FontWeight.w800,
-              color: dark,
-            ),
-          ),
-
-          const SizedBox(height: 14),
-
-          Row(
-            children: [
-              Expanded(
-                child: _actionCard(
-                  context,
-                  icon: Icons.camera_alt_rounded,
-                  title: 'Report',
-                  subtitle: 'Damage',
-                  color: const Color(0xFFFF5A4F),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _actionCard(
-                  context,
-                  icon: Icons.location_on_rounded,
-                  title: 'Find',
-                  subtitle: 'Shelter',
-                  color: primary,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _actionCard(
-                  context,
-                  icon: Icons.emergency_rounded,
-                  title: 'Emergency',
-                  subtitle: 'Help',
-                  color: const Color(0xFFE53935),
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 28),
-
-          const Text(
-            'Your Area',
-            style: TextStyle(
-              fontSize: 21,
-              fontWeight: FontWeight.w800,
-              color: dark,
-            ),
-          ),
-
-          const SizedBox(height: 14),
-
-          Row(
-            children: [
-              Expanded(
-                child: _infoCard(
-                  icon: Icons.home_work_rounded,
-                  title: 'Nearest Shelter',
-                  value: '1.9 km',
-                  color: const Color(0xFFE5F5F3),
-                  iconColor: primary,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _infoCard(
-                  icon: Icons.warning_amber_rounded,
-                  title: 'Danger Zones',
-                  value: '8',
-                  color: const Color(0xFFFFF0ED),
-                  iconColor: const Color(0xFFE85C4A),
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 28),
-
-          Row(
-            children: [
-              const Text(
-                'Live Alerts',
-                style: TextStyle(
-                  fontSize: 21,
-                  fontWeight: FontWeight.w800,
-                  color: dark,
-                ),
-              ),
-              const Spacer(),
-              Container(
-                width: 9,
-                height: 9,
-                decoration: const BoxDecoration(
-                  color: Colors.red,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 6),
-              const Text(
-                'LIVE',
-                style: TextStyle(
-                  color: Colors.red,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 14),
-
-          _alertCard(
-            icon: Icons.water_damage_rounded,
-            title: 'Flood warning',
-            description: 'Heavy rainfall reported in your area.',
-            time: '8 min ago',
-            color: const Color(0xFFE9F5FF),
-            iconColor: const Color(0xFF1684C4),
-          ),
-
-          const SizedBox(height: 10),
-
-          _alertCard(
-            icon: Icons.warning_rounded,
-            title: 'Road closure',
-            description: 'Main road temporarily closed.',
-            time: '24 min ago',
-            color: const Color(0xFFFFF3E8),
-            iconColor: const Color(0xFFE8892D),
-          ),
-
-          const SizedBox(height: 25),
-
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: dark,
-              borderRadius: BorderRadius.circular(23),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.15),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.phone_rounded,
-                    color: Colors.redAccent,
-                  ),
-                ),
-                const SizedBox(width: 14),
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Emergency assistance',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      SizedBox(height: 4),
-                      Text(
-                        'Contact emergency services if needed.',
-                        style: TextStyle(
-                          color: Colors.white60,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.all(11),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: const Icon(
-                    Icons.arrow_forward_rounded,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _actionCard(
-    BuildContext context, {
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required Color color,
-  }) {
-    return GestureDetector(
-      onTap: () {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('$title $subtitle selected'),
-          ),
-        );
-      },
-      child: Container(
-        height: 125,
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(21),
-        ),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Hero card
             Container(
-              width: 45,
-              height: 45,
+              width: double.infinity,
+              padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(14),
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.grey.shade200),
               ),
-              child: Icon(
-                icon,
-                color: color,
-                size: 23,
+              child: Column(
+                children: [
+                  // Icon + Type
+                  Container(
+                    width: 72,
+                    height: 72,
+                    decoration: BoxDecoration(
+                      color: levelColor.withOpacity(0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      _hazardIcon(damageType),
+                      size: 36,
+                      color: levelColor,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '${damageType.toString().toUpperCase()} Detected',
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  // Level badge
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: levelColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      hazardLevel.toString().toUpperCase(),
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: levelColor,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Stats row
+                  Row(
+                    children: [
+                      _statItem(
+                        label: 'Confidence',
+                        value: '${(confidence * 100).toStringAsFixed(0)}%',
+                        color: kPrimary,
+                      ),
+                      Container(
+                        width: 1,
+                        height: 40,
+                        color: Colors.grey.shade200,
+                      ),
+                      _statItem(
+                        label: 'Road Status',
+                        value: roadStatus,
+                        color: levelColor,
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
+
             const Spacer(),
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            Text(
-              subtitle,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
+
+            // Action button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () =>
+                    Navigator.popUntil(context, (route) => route.isFirst),
+                icon: const Icon(Icons.home_outlined),
+                label: const Text(
+                  'Back to Home',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
               ),
             ),
           ],
@@ -1314,116 +1878,26 @@ class DashboardPage extends StatelessWidget {
     );
   }
 
-  Widget _infoCard({
-    required IconData icon,
-    required String title,
+  Widget _statItem({
+    required String label,
     required String value,
     required Color color,
-    required Color iconColor,
   }) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(21),
-      ),
+    return Expanded(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.circular(13),
-            ),
-            child: Icon(
-              icon,
-              color: iconColor,
-            ),
-          ),
-          const SizedBox(height: 15),
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 12,
-              color: Colors.grey,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 3),
           Text(
             value,
-            style: const TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _alertCard({
-    required IconData icon,
-    required String title,
-    required String description,
-    required String time,
-    required Color color,
-    required Color iconColor,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(15),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: Colors.grey.shade200,
-        ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
               color: color,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Icon(
-              icon,
-              color: iconColor,
             ),
           ),
-          const SizedBox(width: 13),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  description,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          const SizedBox(height: 4),
           Text(
-            time,
-            style: const TextStyle(
-              fontSize: 10,
-              color: Colors.grey,
-            ),
+            label,
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
           ),
         ],
       ),
@@ -1435,104 +1909,360 @@ class DashboardPage extends StatelessWidget {
 // MAP PAGE
 // ============================================================
 
-class MapPage extends StatelessWidget {
-  const MapPage({super.key});
+class MapPage extends StatefulWidget {
+  final int userId;
+  const MapPage({super.key, required this.userId});
+
+  @override
+  State<MapPage> createState() => _MapPageState();
+}
+
+class _MapPageState extends State<MapPage> {
+  List<dynamic> hazards = [];
+  List<dynamic> shelters = [];
+  bool loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    setState(() => loading = true);
+    final h = await ApiService.getHazards();
+    final s = await _fetchShelters();
+    if (mounted) {
+      setState(() {
+        hazards = h;
+        shelters = s;
+        loading = false;
+      });
+    }
+  }
+
+  Future<List<dynamic>> _fetchShelters() async {
+    try {
+      final response = await http
+          .get(Uri.parse('${ApiService.baseUrl}/api/shelters'))
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['shelters'] as List<dynamic>? ?? [];
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  Color _getColorForLevel(String? level) {
+    switch (level) {
+      case 'danger':
+        return kDanger;
+      case 'moderate':
+        return kWarning;
+      case 'safe':
+        return kSafe;
+      default:
+        return Colors.grey;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return const Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.map_rounded,
-            size: 70,
-            color: Color(0xFF087F8C),
-          ),
-          SizedBox(height: 15),
-          Text(
-            'Safety Map',
-            style: TextStyle(
-              fontSize: 25,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          SizedBox(height: 6),
-          Text(
-            'Shelters and danger zones will appear here.',
-            style: TextStyle(
-              color: Colors.grey,
-            ),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Hazard Map',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadData,
           ),
         ],
       ),
-    );
-  }
-}
-
-// ============================================================
-// REPORTS PAGE
-// ============================================================
-
-class ReportsPage extends StatelessWidget {
-  const ReportsPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 20),
-          const Text(
-            'My Reports',
-            style: TextStyle(
-              fontSize: 30,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Track your submitted damage reports.',
-            style: TextStyle(
-              color: Colors.grey,
-            ),
-          ),
-          const SizedBox(height: 25),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(30),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(22),
-            ),
-            child: const Column(
+      body: loading
+          ? const Center(child: CircularProgressIndicator(color: kPrimary))
+          : Stack(
               children: [
-                Icon(
-                  Icons.assignment_outlined,
-                  size: 60,
-                  color: Color(0xFF087F8C),
+                FlutterMap(
+                  options: const MapOptions(
+                    initialCenter: LatLng(19.9975, 73.7898),
+                    initialZoom: 12,
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate:
+                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                      userAgentPackageName: 'com.safesense.app',
+                    ),
+                    MarkerLayer(
+                      markers: [
+                        // Hazard markers
+                        ...hazards.map(
+                          (h) => Marker(
+                            point: LatLng(
+                              (h['latitude'] as num).toDouble(),
+                              (h['longitude'] as num).toDouble(),
+                            ),
+                            width: 40,
+                            height: 40,
+                            child: GestureDetector(
+                              onTap: () => _showHazardSheet(h),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color:
+                                      _getColorForLevel(h['hazard_level']),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                      color: Colors.white, width: 2.5),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: _getColorForLevel(
+                                              h['hazard_level'])
+                                          .withOpacity(0.4),
+                                      blurRadius: 6,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: const Center(
+                                  child: Icon(
+                                    Icons.warning_rounded,
+                                    color: Colors.white,
+                                    size: 18,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Shelter markers
+                        ...shelters.map(
+                          (s) => Marker(
+                            point: LatLng(
+                              (s['latitude'] as num).toDouble(),
+                              (s['longitude'] as num).toDouble(),
+                            ),
+                            width: 42,
+                            height: 42,
+                            child: GestureDetector(
+                              onTap: () => _showShelterSheet(s),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                      color: kPrimary, width: 2.5),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: kPrimary.withOpacity(0.3),
+                                      blurRadius: 6,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: const Center(
+                                  child: Icon(
+                                    Icons.home_rounded,
+                                    color: kPrimary,
+                                    size: 20,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
-                SizedBox(height: 15),
-                Text(
-                  'No reports yet',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
+                // Legend
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 16,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.08),
+                          blurRadius: 10,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _legendItem(kDanger, 'Hazard'),
+                        _legendItem(kPrimary, 'Shelter'),
+                      ],
+                    ),
                   ),
                 ),
-                SizedBox(height: 5),
-                Text(
-                  'Your submitted reports will appear here.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.grey,
+                // Hazard count badge
+                Positioned(
+                  top: 12,
+                  right: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.08),
+                          blurRadius: 8,
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      '${hazards.length} hazard${hazards.length == 1 ? '' : 's'} · ${shelters.length} shelter${shelters.length == 1 ? '' : 's'}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
                   ),
                 ),
               ],
             ),
-          ),
+    );
+  }
+
+  Widget _legendItem(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(label,
+            style: const TextStyle(fontSize: 12, color: Colors.black54)),
+      ],
+    );
+  }
+
+  void _showHazardSheet(dynamic hazard) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '${(hazard['damage_type'] ?? 'Unknown').toString().toUpperCase()}',
+              style: const TextStyle(
+                  fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            _detailRow('Hazard Level', hazard['hazard_level'] ?? 'Unknown'),
+            _detailRow('Road Status', hazard['road_status'] ?? 'Unknown'),
+            _detailRow(
+                'Confidence', '${(hazard['confidence'] * 100).toStringAsFixed(0)}%'),
+            _detailRow('Location',
+                '${hazard['latitude']}, ${hazard['longitude']}'),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showShelterSheet(dynamic shelter) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: kPrimaryLight.withOpacity(0.4),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.home_rounded, color: kPrimary, size: 20),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    shelter['name'] ?? 'Unknown Shelter',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _detailRow('Type', shelter['type'] ?? 'N/A'),
+            _detailRow('Capacity', '${shelter['capacity'] ?? 'N/A'}'),
+            _detailRow('Occupancy', '${shelter['occupancy'] ?? 0}'),
+            _detailRow('Contact', shelter['contact'] ?? 'N/A'),
+            _detailRow('Status', shelter['status'] ?? 'N/A'),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
+          Text(value,
+              style: const TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.w600)),
         ],
       ),
     );
@@ -1543,187 +2273,184 @@ class ReportsPage extends StatelessWidget {
 // PROFILE PAGE
 // ============================================================
 
-class ProfilePage extends StatelessWidget {
-  const ProfilePage({super.key});
+class ProfilePage extends StatefulWidget {
+  final int userId;
+  final String userName;
 
-  void logout(BuildContext context) {
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(
-        builder: (_) => const LoginPage(),
-      ),
-      (route) => false,
-    );
+  const ProfilePage({super.key, required this.userId, required this.userName});
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  int reportCount = 0;
+  bool loadingCount = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadReportCount();
+  }
+
+  Future<void> _loadReportCount() async {
+    if (widget.userId == 0) {
+      setState(() => loadingCount = false);
+      return;
+    }
+    final count = await ApiService.getUserReportCount(widget.userId);
+    if (mounted) {
+      setState(() {
+        reportCount = count;
+        loadingCount = false;
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
+    final isGuest = widget.userId == 0;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Profile',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
         children: [
-          const SizedBox(height: 30),
-
+          // Profile card
           Container(
-            width: 90,
-            height: 90,
-            decoration: const BoxDecoration(
-              color: Color(0xFFE5F5F3),
-              shape: BoxShape.circle,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.grey.shade200),
             ),
-            child: const Icon(
-              Icons.person_rounded,
-              color: Color(0xFF087F8C),
-              size: 50,
-            ),
-          ),
-
-          const SizedBox(height: 15),
-
-          const Text(
-            'SafeSense User',
-            style: TextStyle(
-              fontSize: 23,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-
-          const SizedBox(height: 5),
-
-          const Text(
-            'Your safety profile',
-            style: TextStyle(
-              color: Colors.grey,
-            ),
-          ),
-
-          const SizedBox(height: 30),
-
-          _profileOption(
-            Icons.person_outline,
-            'Personal Information',
-          ),
-
-          _profileOption(
-            Icons.phone_outlined,
-            'Emergency Contacts',
-          ),
-
-          _profileOption(
-            Icons.notifications_outlined,
-            'Notifications',
-          ),
-
-          _profileOption(
-            Icons.settings_outlined,
-            'Settings',
-          ),
-
-          const SizedBox(height: 10),
-
-          // Logout
-          GestureDetector(
-            onTap: () {
-              showDialog(
-                context: context,
-                builder: (dialogContext) {
-                  return AlertDialog(
-                    title: const Text(
-                      'Logout',
-                    ),
-                    content: const Text(
-                      'Are you sure you want to logout?',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () {
-                          Navigator.pop(
-                            dialogContext,
-                          );
-                        },
-                        child: const Text(
-                          'Cancel',
+            child: Row(
+              children: [
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    color: kPrimary.withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.person, color: kPrimary, size: 32),
+                ),
+                const SizedBox(width: 18),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.userName,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
-                      TextButton(
-                        onPressed: () {
-                          Navigator.pop(
-                            dialogContext,
-                          );
-                          logout(context);
-                        },
-                        child: const Text(
-                          'Logout',
+                      const SizedBox(height: 4),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: isGuest
+                              ? Colors.grey.withOpacity(0.1)
+                              : kPrimaryLight.withOpacity(0.4),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          isGuest ? 'Guest' : 'Verified',
                           style: TextStyle(
-                            color: Colors.red,
-                            fontWeight: FontWeight.w700,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: isGuest ? Colors.grey : kPrimaryDark,
                           ),
                         ),
                       ),
                     ],
-                  );
-                },
-              );
-            },
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(17),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFEEEE),
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: const Row(
-                children: [
-                  Icon(
-                    Icons.logout_rounded,
-                    color: Colors.red,
                   ),
-                  SizedBox(width: 15),
-                  Text(
-                    'Logout',
-                    style: TextStyle(
-                      color: Colors.red,
-                      fontWeight: FontWeight.w700,
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Stats
+          if (!isGuest) ...[
+            const Text(
+              'Statistics',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: kPrimaryLight.withOpacity(0.4),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.description_outlined,
+                        color: kPrimary, size: 22),
+                  ),
+                  const SizedBox(width: 14),
+                  const Expanded(
+                    child: Text(
+                      'Reports Submitted',
+                      style: TextStyle(fontWeight: FontWeight.w500),
                     ),
                   ),
+                  loadingCount
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(
+                          '$reportCount',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: kPrimary,
+                          ),
+                        ),
                 ],
               ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
+          ],
 
-  Widget _profileOption(
-    IconData icon,
-    String title,
-  ) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            icon,
-            color: const Color(0xFF087F8C),
-          ),
-          const SizedBox(width: 15),
-          Expanded(
-            child: Text(
-              title,
-              style: const TextStyle(
-                fontWeight: FontWeight.w600,
-              ),
+          const SizedBox(height: 32),
+
+          // Logout
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                ApiService.logout();
+                Navigator.pushAndRemoveUntil(
+                  context,
+                  MaterialPageRoute(builder: (_) => const LoginPage()),
+                  (route) => false,
+                );
+              },
+              icon: const Icon(Icons.logout),
+              label: const Text('Logout',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
             ),
-          ),
-          const Icon(
-            Icons.chevron_right_rounded,
-            color: Colors.grey,
           ),
         ],
       ),
