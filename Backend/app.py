@@ -36,14 +36,22 @@ JWT_EXPIRY_HOURS = int(os.getenv('JWT_EXPIRY_HOURS', '24'))
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
-    YOLO_MODEL = YOLO('yolov8n.pt')
-    print("✓ YOLOv8 loaded successfully")
+
+    MODEL_DIR = Path(__file__).parent / 'ai_model'
+    YOLO_MODELS = {
+        'flood': YOLO(str(MODEL_DIR / 'flood_best.pt')),
+        'hazard': YOLO(str(MODEL_DIR / 'hazard_best.pt')),
+        'fire_building': YOLO(str(MODEL_DIR / 'hazard_fire_building_best.pt')),
+    }
+    print(f"✓ YOLO models loaded: {list(YOLO_MODELS.keys())}")
+    for name, m in YOLO_MODELS.items():
+        print(f"  - {name}: classes = {m.names}")
 except ImportError:
     YOLO_AVAILABLE = False
     print("⚠ YOLOv8 not installed. Install with: pip install ultralytics opencv-python")
 except Exception as e:
     YOLO_AVAILABLE = False
-    print(f"⚠ YOLOv8 warning: {e}")
+    print(f"⚠ YOLO warning: {e}")
 
 # ========== DATABASE HELPERS ==========
 def get_db_connection():
@@ -121,38 +129,75 @@ def require_auth(f):
 
 
 # ========== YOLO DAMAGE DETECTION ==========
+# Map each model's class names -> (hazard_level, road_status)
+# ⚠️ EDIT THESE to match the actual class names your models were trained on.
+# Run the app once and check the printed "classes = {...}" output at startup
+# to see the real names, then fix this dict.
+CLASS_INFO = {
+    # flood_best.pt classes
+    'flood':        {'hazard_level': 'danger',   'road_status': 'Blocked'},
+    'waterlogging': {'hazard_level': 'moderate', 'road_status': 'Partially blocked'},
+
+    # hazard_best.pt classes
+    'pothole':      {'hazard_level': 'moderate', 'road_status': 'Passable with caution'},
+    'landslide':    {'hazard_level': 'danger',   'road_status': 'Blocked'},
+
+    # hazard_fire_building_best.pt classes
+    'fire':         {'hazard_level': 'danger',   'road_status': 'Blocked'},
+    'collapse':     {'hazard_level': 'danger',   'road_status': 'Blocked'},
+}
+
 def analyze_damage_with_yolo(image_path):
     """
-    Run YOLOv8 inference on the image.
-    If YOLOv8 not available, returns dummy analysis.
+    Run all trained YOLO models on the image, keep the single
+    highest-confidence detection across all of them.
     """
-    try:
-        if not YOLO_AVAILABLE:
-            # Return mock analysis if YOLOv8 not available
-            return {
-                'damage_type': 'flood',
-                'hazard_level': 'moderate',
-                'confidence': 0.65,
-                'road_status': 'Partially blocked'
-            }
-        
-        # Run YOLO inference
-        results = YOLO_MODEL.predict(image_path, conf=0.5, verbose=False)
-        
-        # Placeholder analysis — replace with actual damage classification
-        damage_type = 'flood'
-        confidence = 0.85
-        hazard_level = 'danger' if confidence > 0.8 else 'moderate' if confidence > 0.5 else 'safe'
-        road_status = 'Blocked'
-        
+    if not YOLO_AVAILABLE:
         return {
-            'damage_type': damage_type,
-            'hazard_level': hazard_level,
-            'confidence': confidence,
-            'road_status': road_status
+            'damage_type': 'flood',
+            'hazard_level': 'moderate',
+            'confidence': 0.65,
+            'road_status': 'Partially blocked'
         }
+
+    try:
+        best_label = None
+        best_conf = 0.0
+
+        for model_name, model in YOLO_MODELS.items():
+            results = model.predict(image_path, conf=0.4, verbose=False)
+            for r in results:
+                if r.boxes is None or len(r.boxes) == 0:
+                    continue
+                for box in r.boxes:
+                    conf = float(box.conf[0])
+                    cls_id = int(box.cls[0])
+                    label = model.names[cls_id]
+                    if conf > best_conf:
+                        best_conf = conf
+                        best_label = label
+
+        if best_label is None:
+            # No detections above threshold in any model
+            return {
+                'damage_type': 'none',
+                'hazard_level': 'safe',
+                'confidence': 0.0,
+                'road_status': 'Clear'
+            }
+
+        info = CLASS_INFO.get(best_label, {'hazard_level': 'moderate', 'road_status': 'Unknown'})
+
+        return {
+            'damage_type': best_label,
+            'hazard_level': info['hazard_level'],
+            'confidence': round(best_conf, 2),
+            'road_status': info['road_status']
+        }
+
     except Exception as e:
         print(f"⚠ YOLO error: {e}")
+        traceback.print_exc()
         return {
             'damage_type': 'unknown',
             'hazard_level': 'moderate',
