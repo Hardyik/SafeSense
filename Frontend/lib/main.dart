@@ -16,24 +16,68 @@ void main() {
 // ============================================================
 // CONSTANTS
 // ============================================================
+// Design goal: this is an EMERGENCY app. Every screen should answer
+// "what do I do right now?" in under 2 seconds. Big touch targets,
+// big text, minimal steps, color = meaning (never decoration only).
 
-const Color kPrimary = Color(0xFF087F8C);
+const Color kPrimary = Color(0xFF087F8C); // calm brand / trust
 const Color kPrimaryDark = Color(0xFF065F68);
 const Color kPrimaryLight = Color(0xFFB2EBF2);
-const Color kDanger = Color(0xFFE53935);
-const Color kWarning = Color(0xFFFF9800);
-const Color kSafe = Color(0xFF43A047);
+const Color kDanger =
+    Color(0xFFD32F2F); // slightly deeper red = more legible on white
+const Color kWarning = Color(0xFFF57C00);
+const Color kSafe = Color(0xFF2E7D32);
 const Color kBg = Color(0xFFF4F6F9);
+const Color kInk = Color(0xFF1A1A1A);
+
+// Shared helpers so every screen agrees on what a color/icon means.
+Color hazardColor(String? level) {
+  switch (level) {
+    case 'danger':
+      return kDanger;
+    case 'moderate':
+      return kWarning;
+    case 'safe':
+      return kSafe;
+    default:
+      return Colors.grey;
+  }
+}
+
+IconData hazardIcon(String? type) {
+  switch (type?.toLowerCase()) {
+    case 'flood':
+      return Icons.water;
+    case 'fire':
+      return Icons.local_fire_department;
+    case 'collapsed_building':
+      return Icons.broken_image;
+    case 'hazard':
+      return Icons.report_problem;
+    default:
+      return Icons.warning_amber_rounded;
+  }
+}
+
+// Handles multi-word class names like "collapsed_building" -> "Collapsed Building"
+String titleCase(String? s) {
+  if (s == null || s.isEmpty) return 'Unknown';
+  return s
+      .replaceAll('_', ' ')
+      .split(' ')
+      .where((w) => w.isNotEmpty)
+      .map((w) => w[0].toUpperCase() + w.substring(1).toLowerCase())
+      .join(' ');
+}
 
 // ============================================================
-// API SERVICE
+// API SERVICE (unchanged logic — only the transport layer)
 // ============================================================
 
 class ApiService {
-  static const String baseUrl = 'http://192.168.0.101:5000';
-  // For web on same machine: 'http://localhost:5000'
+  static const String baseUrl = 'http://localhost:5000';
   // For Android emulator: 'http://10.0.2.2:5000'
-  // For physical device on WiFi: use your computer's IP (ipconfig)
+  // For physical device on WiFi: use your computer's IP (ipconfig/ifconfig)
 
   static String? _authToken;
 
@@ -61,7 +105,6 @@ class ApiService {
     return headers;
   }
 
-  // Login
   static Future<Map<String, dynamic>> login(
       String email, String password) async {
     try {
@@ -90,7 +133,6 @@ class ApiService {
     }
   }
 
-  // Register
   static Future<Map<String, dynamic>> register({
     required String email,
     required String password,
@@ -101,7 +143,7 @@ class ApiService {
       final response = await http
           .post(
             Uri.parse('$baseUrl/api/auth/register'),
-            headers: _authHeaders(),
+            headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'email': email,
               'password': password,
@@ -121,7 +163,6 @@ class ApiService {
     }
   }
 
-  // Upload report with image
   static Future<Map<String, dynamic>> uploadReport({
     required Uint8List imageBytes,
     required String fileName,
@@ -145,7 +186,6 @@ class ApiService {
       if (userId != null && userId > 0) {
         request.fields['user_id'] = userId.toString();
       }
-
       if (description != null && description.isNotEmpty) {
         request.fields['description'] = description;
       }
@@ -164,13 +204,11 @@ class ApiService {
     }
   }
 
-  // Get all hazards
   static Future<List<dynamic>> getHazards() async {
     try {
       final response = await http
           .get(Uri.parse('$baseUrl/api/reports/hazards'))
           .timeout(const Duration(seconds: 10));
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return data['hazards'] as List<dynamic>? ?? [];
@@ -181,7 +219,6 @@ class ApiService {
     }
   }
 
-  // Get nearby hazards
   static Future<List<dynamic>> getNearbyHazards(
     double latitude,
     double longitude, {
@@ -192,7 +229,6 @@ class ApiService {
           .get(Uri.parse(
               '$baseUrl/api/reports/nearby?lat=$latitude&lng=$longitude&radius=$radiusKm'))
           .timeout(const Duration(seconds: 10));
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return data['nearby_hazards'] as List<dynamic>? ?? [];
@@ -203,7 +239,6 @@ class ApiService {
     }
   }
 
-  // Get nearest shelter
   static Future<Map<String, dynamic>> getNearestShelter(
     double latitude,
     double longitude,
@@ -213,7 +248,6 @@ class ApiService {
           .get(Uri.parse(
               '$baseUrl/api/shelters/nearest?lat=$latitude&lng=$longitude'))
           .timeout(const Duration(seconds: 10));
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return data['nearest_shelter'] as Map<String, dynamic>? ?? {};
@@ -224,7 +258,6 @@ class ApiService {
     }
   }
 
-  // Get user reports count
   static Future<int> getUserReportCount(int userId) async {
     try {
       final response = await http
@@ -233,7 +266,6 @@ class ApiService {
             headers: _authHeaders(),
           )
           .timeout(const Duration(seconds: 10));
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return (data['reports'] as List<dynamic>?)?.length ?? 0;
@@ -244,7 +276,6 @@ class ApiService {
     }
   }
 
-  // Logout (clear token)
   static void logout() {
     _authToken = null;
   }
@@ -270,6 +301,10 @@ class SafeSenseApp extends StatelessWidget {
           seedColor: kPrimary,
           brightness: Brightness.light,
         ),
+        textTheme: const TextTheme(
+          bodyMedium: TextStyle(fontSize: 16, height: 1.4),
+          bodyLarge: TextStyle(fontSize: 17, height: 1.4),
+        ),
         appBarTheme: const AppBarTheme(
           backgroundColor: Colors.white,
           foregroundColor: Colors.black87,
@@ -282,49 +317,136 @@ class SafeSenseApp extends StatelessWidget {
             backgroundColor: kPrimary,
             foregroundColor: Colors.white,
             elevation: 0,
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            minimumSize: const Size.fromHeight(58),
+            textStyle:
+                const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
             ),
           ),
         ),
         outlinedButtonTheme: OutlinedButtonThemeData(
           style: OutlinedButton.styleFrom(
             foregroundColor: kPrimary,
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            minimumSize: const Size.fromHeight(58),
+            textStyle:
+                const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
             ),
-            side: const BorderSide(color: kPrimary),
+            side: const BorderSide(color: kPrimary, width: 1.5),
           ),
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
           fillColor: Colors.white,
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             borderSide: BorderSide(color: Colors.grey.shade300),
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             borderSide: BorderSide(color: Colors.grey.shade300),
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             borderSide: const BorderSide(color: kPrimary, width: 2),
           ),
           contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),
         cardTheme: CardThemeData(
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             side: BorderSide(color: Colors.grey.shade200),
           ),
         ),
       ),
-      home: const LoginPage(),
+      home: const WelcomePage(),
+    );
+  }
+}
+
+// ============================================================
+// WELCOME PAGE
+// The single entry point. Getting help never waits on an account —
+// "Continue" drops you straight into the app as a guest. Login is a
+// small secondary link for people who want to report hazards.
+// ============================================================
+
+class WelcomePage extends StatelessWidget {
+  const WelcomePage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            children: [
+              const Spacer(flex: 2),
+              Container(
+                width: 96,
+                height: 96,
+                decoration: const BoxDecoration(
+                  color: kPrimary,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.shield_outlined,
+                    size: 52, color: Colors.white),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'SafeSense',
+                style: TextStyle(
+                    fontSize: 32, fontWeight: FontWeight.bold, color: kInk),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'See the hazard. Find the safe way.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
+              ),
+              const Spacer(flex: 3),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.arrow_forward, size: 22),
+                  label: const Text('Continue — See hazards & shelters'),
+                  onPressed: () {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            const HomePage(userId: 0, userName: 'Guest'),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 20),
+              TextButton(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const LoginPage()),
+                  );
+                },
+                child: const Text(
+                  'Log in to report hazards',
+                  style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: kPrimaryDark),
+                ),
+              ),
+              const Spacer(),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -365,16 +487,13 @@ class _LoginPageState extends State<LoginPage> {
       setState(() => errorMessage = 'Please enter email and password');
       return;
     }
-
     if (!email.contains('@')) {
       setState(() => errorMessage = 'Please enter a valid email');
       return;
     }
 
     setState(() => loading = true);
-
     final result = await ApiService.login(email, password);
-
     setState(() => loading = false);
 
     if (!mounted) return;
@@ -384,12 +503,13 @@ class _LoginPageState extends State<LoginPage> {
       if (result['token'] != null) {
         ApiService.setToken(result['token']);
       }
-      Navigator.pushReplacement(
+      Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(
           builder: (_) => HomePage(
               userId: userId, userName: result['user']['name'] ?? 'User'),
         ),
+        (route) => false,
       );
     } else {
       setState(() => errorMessage = result['error'] ?? 'Login failed');
@@ -399,200 +519,94 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Hero Section
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.fromLTRB(24, 60, 24, 40),
-                decoration: const BoxDecoration(
-                  color: kPrimary,
-                  borderRadius: BorderRadius.only(
-                    bottomLeft: Radius.circular(32),
-                    bottomRight: Radius.circular(32),
-                  ),
-                ),
-                child: Column(
-                  children: [
-                    Container(
-                      width: 72,
-                      height: 72,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.shield_outlined,
-                        size: 40,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'SafeSense',
-                      style: TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'See the hazard. Find the safe way.',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.white.withOpacity(0.85),
-                      ),
-                    ),
-                  ],
+              const Text('Welcome back',
+                  style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              Text('Log in to report hazards near you',
+                  style: TextStyle(fontSize: 15, color: Colors.grey.shade600)),
+              const SizedBox(height: 28),
+              if (errorMessage != null) ...[
+                _ErrorBanner(message: errorMessage!),
+                const SizedBox(height: 20),
+              ],
+              TextField(
+                controller: emailController,
+                keyboardType: TextInputType.emailAddress,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'Email',
+                  hintText: 'you@example.com',
+                  prefixIcon: Icon(Icons.email_outlined),
                 ),
               ),
-
-              // Form Section
-              Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (errorMessage != null) ...[
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: kDanger.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: kDanger.withOpacity(0.3)),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.error_outline,
-                                color: kDanger, size: 20),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                errorMessage!,
-                                style: const TextStyle(color: kDanger),
-                              ),
-                            ),
-                          ],
-                        ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: passwordController,
+                obscureText: !showPassword,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => login(),
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  hintText: 'Enter your password',
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  suffixIcon: IconButton(
+                    icon: Icon(showPassword
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined),
+                    onPressed: () =>
+                        setState(() => showPassword = !showPassword),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 28),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: loading ? null : login,
+                  child: loading
+                      ? const SizedBox(
+                          height: 22,
+                          width: 22,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Text('Log in'),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Center(
+                child: Text.rich(
+                  TextSpan(
+                    text: "Don't have an account? ",
+                    style: const TextStyle(color: Colors.grey),
+                    children: [
+                      TextSpan(
+                        text: 'Sign up',
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => const RegisterPage()),
+                            );
+                          },
+                        style: const TextStyle(
+                            color: kPrimaryDark, fontWeight: FontWeight.w700),
                       ),
-                      const SizedBox(height: 20),
                     ],
-                    const Text(
-                      'Email',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: Colors.black87,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: emailController,
-                      keyboardType: TextInputType.emailAddress,
-                      textInputAction: TextInputAction.next,
-                      decoration: const InputDecoration(
-                        hintText: 'you@example.com',
-                        prefixIcon: Icon(Icons.email_outlined),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    const Text(
-                      'Password',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: Colors.black87,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: passwordController,
-                      obscureText: !showPassword,
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => login(),
-                      decoration: InputDecoration(
-                        hintText: 'Enter your password',
-                        prefixIcon: const Icon(Icons.lock_outline),
-                        suffixIcon: IconButton(
-                          icon: Icon(
-                            showPassword
-                                ? Icons.visibility_off_outlined
-                                : Icons.visibility_outlined,
-                          ),
-                          onPressed: () =>
-                              setState(() => showPassword = !showPassword),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 28),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: loading ? null : login,
-                        child: loading
-                            ? const SizedBox(
-                                height: 20,
-                                width: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Text(
-                                'Log in',
-                                style: TextStyle(
-                                    fontSize: 16, fontWeight: FontWeight.w600),
-                              ),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: () {
-                          Navigator.pushReplacement(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) =>
-                                  const HomePage(userId: 0, userName: 'Guest'),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.explore_outlined),
-                        label: const Text('Continue as guest'),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    Center(
-                      child: Text.rich(
-                        TextSpan(
-                          text: "Don't have an account? ",
-                          style: const TextStyle(color: Colors.grey),
-                          children: [
-                            TextSpan(
-                              text: 'Sign up',
-                              recognizer: TapGestureRecognizer()
-                                ..onTap = () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => const RegisterPage(),
-                                    ),
-                                  );
-                                },
-                              style: TextStyle(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .primary,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ],
@@ -649,27 +663,22 @@ class _RegisterPageState extends State<RegisterPage> {
       setState(() => errorMessage = 'Please fill all required fields');
       return;
     }
-
     if (!email.contains('@')) {
       setState(() => errorMessage = 'Please enter a valid email');
       return;
     }
-
     if (password.length < 6) {
-      setState(
-          () => errorMessage = 'Password must be at least 6 characters');
+      setState(() => errorMessage = 'Password must be at least 6 characters');
       return;
     }
 
     setState(() => loading = true);
-
     final result = await ApiService.register(
       email: email,
       password: password,
       name: name,
       phone: phone,
     );
-
     setState(() => loading = false);
 
     if (!mounted) return;
@@ -699,147 +708,83 @@ class _RegisterPageState extends State<RegisterPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Create Account',
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-              ),
+              const Text('Create account',
+                  style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
-              Text(
-                'Join SafeSense to report and help others',
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Colors.grey,
-                    ),
-              ),
-              const SizedBox(height: 28),
+              Text('Join SafeSense to report and help others',
+                  style: TextStyle(fontSize: 15, color: Colors.grey.shade600)),
+              const SizedBox(height: 24),
               if (errorMessage != null) ...[
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: kDanger.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: kDanger.withOpacity(0.3)),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.error_outline,
-                          color: kDanger, size: 20),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(errorMessage!,
-                            style: const TextStyle(color: kDanger)),
-                      ),
-                    ],
-                  ),
-                ),
+                _ErrorBanner(message: errorMessage!),
                 const SizedBox(height: 16),
               ],
               if (successMessage != null) ...[
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: kSafe.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: kSafe.withOpacity(0.3)),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.check_circle_outline,
-                          color: kSafe, size: 20),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(successMessage!,
-                            style: const TextStyle(color: kSafe)),
-                      ),
-                    ],
-                  ),
-                ),
+                _SuccessBanner(message: successMessage!),
                 const SizedBox(height: 16),
               ],
-              const Text('Full Name',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w600, color: Colors.black87)),
-              const SizedBox(height: 8),
               TextField(
                 controller: nameController,
                 textInputAction: TextInputAction.next,
                 decoration: const InputDecoration(
+                  labelText: 'Full name',
                   hintText: 'John Doe',
                   prefixIcon: Icon(Icons.person_outline),
                 ),
               ),
-              const SizedBox(height: 16),
-              const Text('Email',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w600, color: Colors.black87)),
-              const SizedBox(height: 8),
+              const SizedBox(height: 14),
               TextField(
                 controller: emailController,
                 keyboardType: TextInputType.emailAddress,
                 textInputAction: TextInputAction.next,
                 decoration: const InputDecoration(
+                  labelText: 'Email',
                   hintText: 'you@example.com',
                   prefixIcon: Icon(Icons.email_outlined),
                 ),
               ),
-              const SizedBox(height: 16),
-              const Text('Phone (optional)',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w600, color: Colors.black87)),
-              const SizedBox(height: 8),
+              const SizedBox(height: 14),
               TextField(
                 controller: phoneController,
                 keyboardType: TextInputType.phone,
                 textInputAction: TextInputAction.next,
                 decoration: const InputDecoration(
+                  labelText: 'Phone (optional)',
                   hintText: '9876543210',
                   prefixIcon: Icon(Icons.phone_outlined),
                 ),
               ),
-              const SizedBox(height: 16),
-              const Text('Password',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w600, color: Colors.black87)),
-              const SizedBox(height: 8),
+              const SizedBox(height: 14),
               TextField(
                 controller: passwordController,
                 obscureText: !showPassword,
                 textInputAction: TextInputAction.done,
                 onSubmitted: (_) => register(),
                 decoration: InputDecoration(
+                  labelText: 'Password',
                   hintText: 'At least 6 characters',
                   prefixIcon: const Icon(Icons.lock_outline),
                   suffixIcon: IconButton(
-                    icon: Icon(
-                      showPassword
-                          ? Icons.visibility_off_outlined
-                          : Icons.visibility_outlined,
-                    ),
+                    icon: Icon(showPassword
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined),
                     onPressed: () =>
                         setState(() => showPassword = !showPassword),
                   ),
                 ),
               ),
-              const SizedBox(height: 28),
+              const SizedBox(height: 26),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: loading ? null : register,
                   child: loading
                       ? const SizedBox(
-                          height: 20,
-                          width: 20,
+                          height: 22,
+                          width: 22,
                           child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
+                              strokeWidth: 2, color: Colors.white),
                         )
-                      : const Text(
-                          'Create Account',
-                          style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.w600),
-                        ),
+                      : const Text('Create account'),
                 ),
               ),
             ],
@@ -851,7 +796,7 @@ class _RegisterPageState extends State<RegisterPage> {
 }
 
 // ============================================================
-// HOME PAGE (Bottom Nav Shell)
+// HOME SHELL — 3 tabs + a big always-visible Report FAB
 // ============================================================
 
 class HomePage extends StatefulWidget {
@@ -866,71 +811,144 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   int _currentIndex = 0;
 
+  void _handleReportTap() {
+    if (widget.userId == 0) {
+      // Guests get prompted only at the point they actually need it —
+      // not blocked from anything else in the app.
+      showModalBottomSheet(
+        context: context,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (ctx) => Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.lock_outline, size: 36, color: kPrimary),
+              const SizedBox(height: 12),
+              const Text('Log in to report a hazard',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              Text(
+                'This helps us verify reports and keep the map trustworthy.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const LoginPage()),
+                    );
+                  },
+                  child: const Text('Log in'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => UploadPage(userId: widget.userId)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isGuest = widget.userId == 0;
-
-    // Build page list — guests skip upload (index 1)
     final pages = <Widget>[
-      DashboardPage(userId: widget.userId, isGuest: isGuest),
-      if (!isGuest) UploadPage(userId: widget.userId),
+      DashboardPage(
+          userId: widget.userId,
+          isGuest: isGuest,
+          onReportTap: _handleReportTap),
       MapPage(userId: widget.userId),
       ProfilePage(userId: widget.userId, userName: widget.userName),
     ];
 
-    // Clamp index if needed
-    if (_currentIndex >= pages.length) {
-      _currentIndex = 0;
-    }
-
     return Scaffold(
       body: pages[_currentIndex],
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (index) {
-          setState(() => _currentIndex = index);
-        },
-        backgroundColor: Colors.white,
-        surfaceTintColor: kPrimaryLight,
-        height: 64,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        destinations: [
-          const NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home, color: kPrimary),
-            label: 'Home',
-          ),
-          if (!isGuest)
-            const NavigationDestination(
-              icon: Icon(Icons.camera_alt_outlined),
-              selectedIcon: Icon(Icons.camera_alt, color: kPrimary),
-              label: 'Report',
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
+      floatingActionButton: SizedBox(
+        width: 66,
+        height: 66,
+        child: FloatingActionButton(
+          onPressed: _handleReportTap,
+          backgroundColor: kDanger,
+          elevation: 3,
+          shape: const CircleBorder(),
+          child: const Icon(Icons.camera_alt, color: Colors.white, size: 28),
+        ),
+      ),
+      bottomNavigationBar: BottomAppBar(
+        shape: const CircularNotchedRectangle(),
+        notchMargin: 8,
+        color: Colors.white,
+        height: 74,
+        padding: EdgeInsets.zero,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            _navItem(Icons.home_rounded, 'Home', 0),
+            _navItem(Icons.map_rounded, 'Map', 1),
+            const SizedBox(width: 48), // notch space for FAB
+            _navItem(Icons.person_rounded, 'Profile', 2),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _navItem(IconData icon, String label, int index) {
+    final selected = _currentIndex == index;
+    return InkWell(
+      onTap: () => setState(() => _currentIndex = index),
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+                color: selected ? kPrimary : Colors.grey.shade400, size: 26),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                color: selected ? kPrimary : Colors.grey.shade500,
+              ),
             ),
-          const NavigationDestination(
-            icon: Icon(Icons.map_outlined),
-            selectedIcon: Icon(Icons.map, color: kPrimary),
-            label: 'Map',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person, color: kPrimary),
-            label: 'Profile',
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
 // ============================================================
-// DASHBOARD PAGE
+// DASHBOARD / HOME — status-first layout
 // ============================================================
 
 class DashboardPage extends StatefulWidget {
   final int userId;
   final bool isGuest;
+  final VoidCallback onReportTap;
 
-  const DashboardPage({super.key, required this.userId, required this.isGuest});
+  const DashboardPage({
+    super.key,
+    required this.userId,
+    required this.isGuest,
+    required this.onReportTap,
+  });
 
   @override
   State<DashboardPage> createState() => _DashboardPageState();
@@ -960,35 +978,9 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  Color _hazardColor(String? level) {
-    switch (level) {
-      case 'danger':
-        return kDanger;
-      case 'moderate':
-        return kWarning;
-      case 'safe':
-        return kSafe;
-      default:
-        return Colors.grey;
-    }
-  }
-
-  IconData _hazardIcon(String? type) {
-    switch (type) {
-      case 'flood':
-        return Icons.water;
-      case 'fire':
-        return Icons.local_fire_department;
-      case 'collapse':
-        return Icons.broken_image;
-      default:
-        return Icons.warning_amber_rounded;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    final topAlert = nearbyHazards.isNotEmpty ? nearbyHazards.first : null;
+    final worstLevel = _worstLevel();
 
     return Scaffold(
       appBar: AppBar(
@@ -997,11 +989,9 @@ class _DashboardPageState extends State<DashboardPage> {
           children: [
             Icon(Icons.shield_outlined, color: kPrimary, size: 24),
             SizedBox(width: 8),
-            Text(
-              'SafeSense',
-              style: TextStyle(
-                  fontWeight: FontWeight.bold, color: kPrimaryDark),
-            ),
+            Text('SafeSense',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, color: kPrimaryDark)),
           ],
         ),
       ),
@@ -1011,88 +1001,60 @@ class _DashboardPageState extends State<DashboardPage> {
               color: kPrimary,
               onRefresh: _loadData,
               child: ListView(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
                 children: [
-                  // Guest banner
-                  if (widget.isGuest)
-                    _infoBanner(
-                      icon: Icons.info_outline,
-                      color: Colors.blue,
-                      message:
-                          'You are browsing as guest. Sign up to report hazards.',
-                    ),
+                  // ---- STATUS CARD — the single most important thing on screen
+                  _StatusCard(
+                      level: worstLevel, hazardCount: nearbyHazards.length),
 
-                  // Top danger alert (from real data)
-                  if (!widget.isGuest && topAlert != null)
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [
-                            _hazardColor(topAlert['hazard_level'])
-                                .withOpacity(0.15),
-                            _hazardColor(topAlert['hazard_level'])
-                                .withOpacity(0.05),
-                          ],
-                        ),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                          color: _hazardColor(topAlert['hazard_level'])
-                              .withOpacity(0.4),
+                  const SizedBox(height: 16),
+
+                  // ---- TWO BIG PRIMARY ACTIONS
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _BigActionTile(
+                          icon: Icons.camera_alt_rounded,
+                          label: 'Report\nHazard',
+                          color: kDanger,
+                          onTap: widget.onReportTap,
                         ),
                       ),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 44,
-                            height: 44,
-                            decoration: BoxDecoration(
-                              color: _hazardColor(topAlert['hazard_level'])
-                                  .withOpacity(0.2),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Icon(
-                              Icons.warning_amber_rounded,
-                              color: _hazardColor(topAlert['hazard_level']),
-                              size: 24,
-                            ),
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '${(topAlert['damage_type'] ?? 'Hazard').toString().toUpperCase()} detected',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  topAlert['road_status'] ?? 'Check route',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          Icon(
-                            Icons.chevron_right,
-                            color: Colors.grey.shade400,
-                          ),
-                        ],
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _BigActionTile(
+                          icon: Icons.home_work_rounded,
+                          label: 'Find\nShelter',
+                          color: kPrimary,
+                          onTap: () {
+                            DefaultTabController.maybeOf(context);
+                            final state = context
+                                .findAncestorStateOfType<_HomePageState>();
+                            state?.setState(() => state._currentIndex = 1);
+                          },
+                        ),
                       ),
-                    ),
+                    ],
+                  ),
 
                   const SizedBox(height: 24),
 
-                  // Section header: Nearby Hazards
-                  _sectionHeader('Nearby Hazards', '${nearbyHazards.length} active'),
-                  const SizedBox(height: 12),
+                  if (widget.isGuest) ...[
+                    _InfoBanner(
+                      icon: Icons.info_outline,
+                      color: Colors.blue,
+                      message:
+                          'Browsing as guest. Log in to submit hazard reports.',
+                    ),
+                    const SizedBox(height: 20),
+                  ],
+
+                  Text('Nearby Hazards (${nearbyHazards.length})',
+                      style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.bold,
+                          color: kInk)),
+                  const SizedBox(height: 10),
 
                   if (nearbyHazards.isEmpty)
                     _emptyState(
@@ -1101,64 +1063,16 @@ class _DashboardPageState extends State<DashboardPage> {
                       color: kSafe,
                     )
                   else
-                    ...nearbyHazards.map((h) => Container(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.grey.shade200),
-                          ),
-                          child: Row(
-                            children: [
-                              Container(
-                                width: 44,
-                                height: 44,
-                                decoration: BoxDecoration(
-                                  color: _hazardColor(h['hazard_level'])
-                                      .withOpacity(0.12),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Icon(
-                                  _hazardIcon(h['damage_type']),
-                                  color: _hazardColor(h['hazard_level']),
-                                  size: 22,
-                                ),
-                              ),
-                              const SizedBox(width: 14),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      _capitalize(h['damage_type'] ?? 'Unknown'),
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 3),
-                                    Text(
-                                      '${h['road_status'] ?? ''}  ·  ${(h['confidence'] * 100).toStringAsFixed(0)}% confidence',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.grey.shade500,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              _levelBadge(h['hazard_level']),
-                            ],
-                          ),
-                        )),
+                    ...nearbyHazards.map((h) => _HazardTile(hazard: h)),
 
                   const SizedBox(height: 24),
 
-                  // Section header: Nearest Shelter
-                  _sectionHeader('Nearest Shelter', ''),
-                  const SizedBox(height: 12),
+                  const Text('Nearest Shelter',
+                      style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.bold,
+                          color: kInk)),
+                  const SizedBox(height: 10),
 
                   if (nearestShelter.isEmpty)
                     _emptyState(
@@ -1167,138 +1081,281 @@ class _DashboardPageState extends State<DashboardPage> {
                       color: Colors.grey,
                     )
                   else
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 48,
-                            height: 48,
-                            decoration: BoxDecoration(
-                              color: kPrimaryLight.withOpacity(0.4),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Icon(
-                              Icons.home_work_outlined,
-                              color: kPrimary,
-                              size: 24,
-                            ),
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  nearestShelter['name'] ?? 'Unknown',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                                const SizedBox(height: 3),
-                                Text(
-                                  '${(nearestShelter['distance_km'] ?? 0).toStringAsFixed(1)} km away',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey.shade500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: kPrimaryLight.withOpacity(0.3),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              nearestShelter['phone'] ?? 'N/A',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12,
-                                color: kPrimaryDark,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                  const SizedBox(height: 20),
+                    _ShelterTile(shelter: nearestShelter),
                 ],
               ),
             ),
     );
   }
 
-  // --- Helpers ---
+  String? _worstLevel() {
+    if (nearbyHazards.isEmpty) return 'safe';
+    if (nearbyHazards.any((h) => h['hazard_level'] == 'danger'))
+      return 'danger';
+    if (nearbyHazards.any((h) => h['hazard_level'] == 'moderate'))
+      return 'moderate';
+    return 'safe';
+  }
 
-  Widget _sectionHeader(String title, String subtitle) {
-    return Row(
-      children: [
-        Text(
-          title,
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: Colors.black87,
-          ),
+  Widget _emptyState({
+    required IconData icon,
+    required String message,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 32),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Center(
+        child: Column(
+          children: [
+            Icon(icon, size: 36, color: color.withOpacity(0.5)),
+            const SizedBox(height: 10),
+            Text(message,
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade500)),
+          ],
         ),
-        if (subtitle.isNotEmpty) ...[
-          const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: kPrimaryLight.withOpacity(0.5),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              subtitle,
-              style: const TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: kPrimaryDark,
-              ),
+      ),
+    );
+  }
+}
+
+// ---- Status hero card: the one glance that tells you everything ----
+class _StatusCard extends StatelessWidget {
+  final String? level;
+  final int hazardCount;
+  const _StatusCard({required this.level, required this.hazardCount});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = hazardColor(level);
+    final isSafe = level == 'safe' || level == null;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+              color: color.withOpacity(0.35),
+              blurRadius: 16,
+              offset: const Offset(0, 6)),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isSafe ? Icons.check_circle_rounded : Icons.warning_rounded,
+            color: Colors.white,
+            size: 42,
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isSafe ? 'You are safe' : 'Hazard nearby',
+                  style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  isSafe
+                      ? 'No active hazards detected around you'
+                      : '$hazardCount hazard${hazardCount == 1 ? '' : 's'} reported near your location',
+                  style: TextStyle(
+                      fontSize: 13, color: Colors.white.withOpacity(0.9)),
+                ),
+              ],
             ),
           ),
         ],
-      ],
+      ),
     );
   }
+}
 
-  Widget _levelBadge(String? level) {
-    final color = _hazardColor(level);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Text(
-        (level ?? 'unknown').toUpperCase(),
-        style: TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          color: color,
-          letterSpacing: 0.5,
+class _BigActionTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+  const _BigActionTile(
+      {required this.icon,
+      required this.label,
+      required this.color,
+      required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        height: 110,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: color.withOpacity(0.3), width: 1.5),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: color, size: 30),
+            const SizedBox(height: 8),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 13, fontWeight: FontWeight.w700, color: color),
+            ),
+          ],
         ),
       ),
     );
   }
+}
 
-  Widget _infoBanner({
-    required IconData icon,
-    required Color color,
-    required String message,
-  }) {
+class _HazardTile extends StatelessWidget {
+  final dynamic hazard;
+  const _HazardTile({required this.hazard});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = hazardColor(hazard['hazard_level']);
+    final confidence = (hazard['confidence'] ?? 0) is num
+        ? ((hazard['confidence'] ?? 0) * 100).toStringAsFixed(0)
+        : '0';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child:
+                Icon(hazardIcon(hazard['damage_type']), color: color, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(titleCase(hazard['damage_type']),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w700, fontSize: 15)),
+                const SizedBox(height: 3),
+                Text(
+                  '${hazard['road_status'] ?? ''}  ·  $confidence% confidence',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+                color: color.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(8)),
+            child: Text(
+              (hazard['hazard_level'] ?? 'unknown').toString().toUpperCase(),
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  color: color,
+                  letterSpacing: 0.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShelterTile extends StatelessWidget {
+  final Map<String, dynamic> shelter;
+  const _ShelterTile({required this.shelter});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 50,
+            height: 50,
+            decoration: BoxDecoration(
+                color: kPrimaryLight.withOpacity(0.4),
+                borderRadius: BorderRadius.circular(12)),
+            child:
+                const Icon(Icons.home_work_outlined, color: kPrimary, size: 24),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(shelter['name'] ?? 'Unknown',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w700, fontSize: 15)),
+                const SizedBox(height: 3),
+                Text(
+                    '${(shelter['distance_km'] ?? 0).toStringAsFixed(1)} km away',
+                    style:
+                        TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+                color: kPrimaryLight.withOpacity(0.3),
+                borderRadius: BorderRadius.circular(8)),
+            child: Text(shelter['phone'] ?? 'N/A',
+                style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                    color: kPrimaryDark)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoBanner extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String message;
+  const _InfoBanner(
+      {required this.icon, required this.color, required this.message});
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -1311,55 +1368,66 @@ class _DashboardPageState extends State<DashboardPage> {
           Icon(icon, color: color, size: 20),
           const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              message,
-              style: TextStyle(
-                  fontSize: 13, color: color.withOpacity(0.9)),
-            ),
-          ),
+              child: Text(message,
+                  style:
+                      TextStyle(fontSize: 13, color: color.withOpacity(0.9)))),
         ],
       ),
     );
   }
+}
 
-  Widget _emptyState({
-    required IconData icon,
-    required String message,
-    required Color color,
-  }) {
+class _ErrorBanner extends StatelessWidget {
+  final String message;
+  const _ErrorBanner({required this.message});
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 32),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: kDanger.withOpacity(0.1),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: kDanger.withOpacity(0.3)),
       ),
-      child: Center(
-        child: Column(
-          children: [
-            Icon(icon, size: 36, color: color.withOpacity(0.5)),
-            const SizedBox(height: 10),
-            Text(
-              message,
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey.shade500,
-              ),
-            ),
-          ],
-        ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, color: kDanger, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+              child: Text(message, style: const TextStyle(color: kDanger))),
+        ],
       ),
     );
   }
+}
 
-  String _capitalize(String s) {
-    if (s.isEmpty) return s;
-    return s[0].toUpperCase() + s.substring(1);
+class _SuccessBanner extends StatelessWidget {
+  final String message;
+  const _SuccessBanner({required this.message});
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: kSafe.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: kSafe.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.check_circle_outline, color: kSafe, size: 20),
+          const SizedBox(width: 10),
+          Expanded(child: Text(message, style: const TextStyle(color: kSafe))),
+        ],
+      ),
+    );
   }
 }
 
 // ============================================================
-// UPLOAD PAGE
+// UPLOAD PAGE — as few steps as possible: open camera → confirm → send.
+// Location is fetched automatically the moment the page opens instead
+// of requiring manual entry.
 // ============================================================
 
 class UploadPage extends StatefulWidget {
@@ -1374,27 +1442,38 @@ class _UploadPageState extends State<UploadPage> {
   XFile? selectedImage;
   Uint8List? _imageBytes;
   bool loading = false;
+  bool _locating = false;
+  bool _showDetails = false;
 
-  final latController = TextEditingController(text: '19.9975');
-  final lngController = TextEditingController(text: '73.7898');
+  double? _lat;
+  double? _lng;
   final notesController = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    // Try to get GPS immediately so the user never has to think about it.
+    _getCurrentLocation(silent: true);
+    // Jump straight to the camera — reduces one tap for the most common path.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      pickImage(ImageSource.camera);
+    });
+  }
+
+  @override
   void dispose() {
-    latController.dispose();
-    lngController.dispose();
     notesController.dispose();
     super.dispose();
   }
 
-  bool _locating = false;
-
-  Future<void> _getCurrentLocation() async {
+  Future<void> _getCurrentLocation({bool silent = false}) async {
     setState(() => _locating = true);
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        _showMessage('Location services are disabled. Please enable GPS.', isError: true);
+        if (!silent)
+          _showMessage('Location services are disabled. Please enable GPS.',
+              isError: true);
         setState(() => _locating = false);
         return;
       }
@@ -1402,13 +1481,18 @@ class _UploadPageState extends State<UploadPage> {
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          _showMessage('Location permission denied', isError: true);
+          if (!silent)
+            _showMessage('Location permission denied', isError: true);
           setState(() => _locating = false);
           return;
         }
       }
       if (permission == LocationPermission.deniedForever) {
-        _showMessage('Location permission permanently denied. Enable in settings.', isError: true);
+        if (!silent) {
+          _showMessage(
+              'Location permission permanently denied. Enable in settings.',
+              isError: true);
+        }
         setState(() => _locating = false);
         return;
       }
@@ -1417,14 +1501,13 @@ class _UploadPageState extends State<UploadPage> {
         timeLimit: const Duration(seconds: 10),
       );
       setState(() {
-        latController.text = position.latitude.toStringAsFixed(6);
-        lngController.text = position.longitude.toStringAsFixed(6);
+        _lat = position.latitude;
+        _lng = position.longitude;
         _locating = false;
       });
-      _showMessage('Location updated!');
     } catch (e) {
       setState(() => _locating = false);
-      _showMessage('Could not get location: ', isError: true);
+      if (!silent) _showMessage('Could not get location', isError: true);
     }
   }
 
@@ -1450,15 +1533,14 @@ class _UploadPageState extends State<UploadPage> {
 
   Future<void> uploadReport() async {
     if (selectedImage == null || _imageBytes == null) {
-      _showMessage('Please select an image first', isError: true);
+      _showMessage('Please select a photo first', isError: true);
       return;
     }
-
-    final lat = double.tryParse(latController.text);
-    final lng = double.tryParse(lngController.text);
-    if (lat == null || lng == null) {
-      _showMessage('Please enter valid coordinates', isError: true);
-      return;
+    if (_lat == null || _lng == null) {
+      _showMessage('Still finding your location — try again in a moment',
+          isError: true);
+      await _getCurrentLocation();
+      if (_lat == null || _lng == null) return;
     }
 
     setState(() => loading = true);
@@ -1466,27 +1548,22 @@ class _UploadPageState extends State<UploadPage> {
     final result = await ApiService.uploadReport(
       imageBytes: _imageBytes!,
       fileName: selectedImage!.name,
-      latitude: lat,
-      longitude: lng,
+      latitude: _lat!,
+      longitude: _lng!,
       userId: widget.userId,
-      description: notesController.text.trim().isNotEmpty ? notesController.text.trim() : null,
+      description: notesController.text.trim().isNotEmpty
+          ? notesController.text.trim()
+          : null,
     );
 
     setState(() => loading = false);
-
     if (!mounted) return;
 
     if (result['status'] == 'success') {
-      setState(() {
-        selectedImage = null;
-        _imageBytes = null;
-      });
-      notesController.clear();
-      Navigator.push(
+      Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) => ResultPage(analysis: result['analysis']),
-        ),
+            builder: (_) => ResultPage(analysis: result['analysis'])),
       );
     } else {
       _showMessage(result['error'] ?? 'Upload failed', isError: true);
@@ -1498,11 +1575,8 @@ class _UploadPageState extends State<UploadPage> {
       SnackBar(
         content: Row(
           children: [
-            Icon(
-              isError ? Icons.error_outline : Icons.check_circle_outline,
-              color: Colors.white,
-              size: 18,
-            ),
+            Icon(isError ? Icons.error_outline : Icons.check_circle_outline,
+                color: Colors.white, size: 18),
             const SizedBox(width: 10),
             Expanded(child: Text(message)),
           ],
@@ -1526,7 +1600,6 @@ class _UploadPageState extends State<UploadPage> {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            // Image preview area
             Expanded(
               child: selectedImage == null
                   ? GestureDetector(
@@ -1537,44 +1610,31 @@ class _UploadPageState extends State<UploadPage> {
                           color: Colors.white,
                           borderRadius: BorderRadius.circular(16),
                           border: Border.all(
-                            color: kPrimary.withOpacity(0.3),
-                            width: 2,
-                            style: BorderStyle.solid,
-                          ),
+                              color: kPrimary.withOpacity(0.3), width: 2),
                         ),
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Container(
-                              width: 72,
-                              height: 72,
+                              width: 80,
+                              height: 80,
                               decoration: BoxDecoration(
-                                color: kPrimary.withOpacity(0.1),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.add_a_photo_outlined,
-                                size: 36,
-                                color: kPrimary,
-                              ),
+                                  color: kPrimary.withOpacity(0.1),
+                                  shape: BoxShape.circle),
+                              child: const Icon(Icons.add_a_photo_outlined,
+                                  size: 40, color: kPrimary),
                             ),
                             const SizedBox(height: 16),
-                            const Text(
-                              'Tap to add a photo',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.black87,
-                              ),
-                            ),
+                            const Text('Tap to add a photo',
+                                style: TextStyle(
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.black87)),
                             const SizedBox(height: 6),
                             Text(
-                              'Take a photo or choose from gallery',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.grey.shade500,
-                              ),
-                            ),
+                                'This is the only thing we need to get started',
+                                style: TextStyle(
+                                    fontSize: 13, color: Colors.grey.shade500)),
                           ],
                         ),
                       ),
@@ -1584,16 +1644,10 @@ class _UploadPageState extends State<UploadPage> {
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
-                          // Show image from bytes (works on web + mobile)
                           _imageBytes != null
-                              ? Image.memory(
-                                  _imageBytes!,
-                                  fit: BoxFit.cover,
-                                )
+                              ? Image.memory(_imageBytes!, fit: BoxFit.cover)
                               : const Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                          // Remove button
+                                  child: CircularProgressIndicator()),
                           Positioned(
                             top: 12,
                             right: 12,
@@ -1605,14 +1659,45 @@ class _UploadPageState extends State<UploadPage> {
                               child: Container(
                                 padding: const EdgeInsets.all(6),
                                 decoration: BoxDecoration(
-                                  color: Colors.black.withOpacity(0.6),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Icon(
-                                  Icons.close,
-                                  color: Colors.white,
-                                  size: 18,
-                                ),
+                                    color: Colors.black.withOpacity(0.6),
+                                    shape: BoxShape.circle),
+                                child: const Icon(Icons.close,
+                                    color: Colors.white, size: 18),
+                              ),
+                            ),
+                          ),
+                          // Location chip overlay — visible confirmation, zero taps needed.
+                          Positioned(
+                            left: 12,
+                            bottom: 12,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.6),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _locating
+                                      ? const SizedBox(
+                                          width: 12,
+                                          height: 12,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white))
+                                      : const Icon(Icons.location_on,
+                                          color: Colors.white, size: 14),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    _lat != null
+                                        ? '${_lat!.toStringAsFixed(4)}, ${_lng!.toStringAsFixed(4)}'
+                                        : 'Locating…',
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 11),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
@@ -1620,121 +1705,64 @@ class _UploadPageState extends State<UploadPage> {
                       ),
                     ),
             ),
-            const SizedBox(height: 16),
-
-            // Action buttons
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => pickImage(ImageSource.camera),
-                    icon: const Icon(Icons.camera_alt_outlined),
-                    label: const Text('Camera'),
+            const SizedBox(height: 14),
+            if (selectedImage != null) ...[
+              // Progressive disclosure — the notes field is hidden unless
+              // the person actually wants to add more detail.
+              if (!_showDetails)
+                TextButton.icon(
+                  onPressed: () => setState(() => _showDetails = true),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('Add details (optional)'),
+                )
+              else
+                TextField(
+                  controller: notesController,
+                  maxLines: 2,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Additional info (optional)',
+                    hintText:
+                        'e.g. Road near river bridge, water rising fast...',
+                    isDense: true,
                   ),
+                  style: const TextStyle(fontSize: 13),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => pickImage(ImageSource.gallery),
-                    icon: const Icon(Icons.photo_library_outlined),
-                    label: const Text('Gallery'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // Editable coordinates
-            Row(
-              children: [
-                const Icon(Icons.location_on_outlined, color: kPrimary, size: 18),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: latController,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Latitude',
-                      hintText: '19.9975',
-                      isDense: true,
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    ),
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
-                    controller: lngController,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Longitude',
-                      hintText: '73.7898',
-                      isDense: true,
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    ),
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Container(
-                  decoration: BoxDecoration(
-                    color: kPrimaryLight.withOpacity(0.3),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: IconButton(
-                    onPressed: _locating ? null : _getCurrentLocation,
-                    icon: _locating
-                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: kPrimary))
-                        : const Icon(Icons.my_location, color: kPrimary, size: 22),
-                    tooltip: 'Get current location',
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            // Additional info
-            TextField(
-              controller: notesController,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                labelText: 'Additional info (optional)',
-                hintText: 'e.g. Road near river bridge, water rising fast...',
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                prefixIcon: Padding(
-                  padding: EdgeInsets.only(left: 12, right: 8),
-                  child: Icon(Icons.notes_outlined, size: 18),
-                ),
-                prefixIconConstraints: BoxConstraints(minWidth: 0, minHeight: 0),
-              ),
-              style: const TextStyle(fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-
-            // Submit button
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: loading ? null : uploadReport,
-                icon: loading
-                    ? const SizedBox(
-                        height: 18,
-                        width: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Icon(Icons.send_outlined),
-                label: Text(
-                  loading ? 'Analyzing...' : 'Analyze & Submit',
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w600),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: loading ? null : uploadReport,
+                  icon: loading
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.send_rounded),
+                  label: Text(loading ? 'Analyzing…' : 'Submit Report'),
                 ),
               ),
-            ),
+            ] else
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => pickImage(ImageSource.camera),
+                      icon: const Icon(Icons.camera_alt_outlined),
+                      label: const Text('Camera'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => pickImage(ImageSource.gallery),
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: const Text('Gallery'),
+                    ),
+                  ),
+                ],
+              ),
           ],
         ),
       ),
@@ -1745,8 +1773,7 @@ class _UploadPageState extends State<UploadPage> {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -1757,15 +1784,12 @@ class _UploadPageState extends State<UploadPage> {
                 width: 40,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
-                ),
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2)),
               ),
               const SizedBox(height: 20),
-              const Text(
-                'Add a photo',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-              ),
+              const Text('Add a photo',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
               const SizedBox(height: 20),
               ListTile(
                 leading: const Icon(Icons.camera_alt_outlined, color: kPrimary),
@@ -1802,53 +1826,24 @@ class _UploadPageState extends State<UploadPage> {
 
 class ResultPage extends StatelessWidget {
   final Map<String, dynamic> analysis;
-
   const ResultPage({super.key, required this.analysis});
-
-  Color _hazardColor(String? level) {
-    switch (level) {
-      case 'danger':
-        return kDanger;
-      case 'moderate':
-        return kWarning;
-      case 'safe':
-        return kSafe;
-      default:
-        return Colors.grey;
-    }
-  }
-
-  IconData _hazardIcon(String? type) {
-    switch (type) {
-      case 'flood':
-        return Icons.water;
-      case 'fire':
-        return Icons.local_fire_department;
-      case 'collapse':
-        return Icons.broken_image;
-      default:
-        return Icons.warning_amber_rounded;
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
     final hazardLevel = analysis['hazard_level'] ?? 'unknown';
-    final levelColor = _hazardColor(hazardLevel);
+    final levelColor = hazardColor(hazardLevel);
     final damageType = analysis['damage_type'] ?? 'Unknown';
     final confidence = analysis['confidence'] ?? 0;
     final roadStatus = analysis['road_status'] ?? 'Unknown';
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Analysis Result',
-            style: TextStyle(fontWeight: FontWeight.w600)),
-      ),
+          title: const Text('Analysis Result',
+              style: TextStyle(fontWeight: FontWeight.w600))),
       body: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            // Hero card
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(24),
@@ -1859,86 +1854,70 @@ class ResultPage extends StatelessWidget {
               ),
               child: Column(
                 children: [
-                  // Icon + Type
                   Container(
-                    width: 72,
-                    height: 72,
+                    width: 80,
+                    height: 80,
                     decoration: BoxDecoration(
-                      color: levelColor.withOpacity(0.12),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      _hazardIcon(damageType),
-                      size: 36,
-                      color: levelColor,
-                    ),
+                        color: levelColor.withOpacity(0.12),
+                        shape: BoxShape.circle),
+                    child: Icon(hazardIcon(damageType),
+                        size: 40, color: levelColor),
                   ),
                   const SizedBox(height: 16),
-                  Text(
-                    '${damageType.toString().toUpperCase()} Detected',
-                    style: const TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                  Text('${damageType.toString().toUpperCase()} Detected',
+                      style: const TextStyle(
+                          fontSize: 21, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  // Level badge
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                     decoration: BoxDecoration(
-                      color: levelColor.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
+                        color: levelColor.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(20)),
                     child: Text(
                       hazardLevel.toString().toUpperCase(),
                       style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: levelColor,
-                        letterSpacing: 1,
-                      ),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: levelColor,
+                          letterSpacing: 1),
                     ),
                   ),
                   const SizedBox(height: 24),
-
-                  // Stats row
                   Row(
                     children: [
                       _statItem(
-                        label: 'Confidence',
-                        value: '${(confidence * 100).toStringAsFixed(0)}%',
-                        color: kPrimary,
-                      ),
+                          label: 'Confidence',
+                          value: '${(confidence * 100).toStringAsFixed(0)}%',
+                          color: kPrimary),
                       Container(
-                        width: 1,
-                        height: 40,
-                        color: Colors.grey.shade200,
-                      ),
+                          width: 1, height: 40, color: Colors.grey.shade200),
                       _statItem(
-                        label: 'Road Status',
-                        value: roadStatus,
-                        color: levelColor,
-                      ),
+                          label: 'Road Status',
+                          value: roadStatus,
+                          color: levelColor),
                     ],
                   ),
                 ],
               ),
             ),
-
+            if (hazardLevel == 'danger') ...[
+              const SizedBox(height: 16),
+              _InfoBanner(
+                icon: Icons.info_outline,
+                color: kDanger,
+                message:
+                    'This is a high-risk report. Check the Map tab for the nearest shelter and avoid this route.',
+              ),
+            ],
             const Spacer(),
-
-            // Action button
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
                 onPressed: () =>
                     Navigator.popUntil(context, (route) => route.isFirst),
                 icon: const Icon(Icons.home_outlined),
-                label: const Text(
-                  'Back to Home',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                ),
+                label: const Text('Back to Home'),
               ),
             ),
           ],
@@ -1947,27 +1926,17 @@ class ResultPage extends StatelessWidget {
     );
   }
 
-  Widget _statItem({
-    required String label,
-    required String value,
-    required Color color,
-  }) {
+  Widget _statItem(
+      {required String label, required String value, required Color color}) {
     return Expanded(
       child: Column(
         children: [
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: color,
-            ),
-          ),
+          Text(value,
+              style: TextStyle(
+                  fontSize: 20, fontWeight: FontWeight.bold, color: color)),
           const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-          ),
+          Text(label,
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
         ],
       ),
     );
@@ -2025,19 +1994,6 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
-  Color _getColorForLevel(String? level) {
-    switch (level) {
-      case 'danger':
-        return kDanger;
-      case 'moderate':
-        return kWarning;
-      case 'safe':
-        return kSafe;
-      default:
-        return Colors.grey;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2045,10 +2001,7 @@ class _MapPageState extends State<MapPage> {
         title: const Text('Hazard Map',
             style: TextStyle(fontWeight: FontWeight.w600)),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadData,
-          ),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadData)
         ],
       ),
       body: loading
@@ -2057,9 +2010,7 @@ class _MapPageState extends State<MapPage> {
               children: [
                 FlutterMap(
                   options: const MapOptions(
-                    initialCenter: LatLng(19.9975, 73.7898),
-                    initialZoom: 12,
-                  ),
+                      initialCenter: LatLng(19.9975, 73.7898), initialZoom: 12),
                   children: [
                     TileLayer(
                       urlTemplate:
@@ -2068,77 +2019,58 @@ class _MapPageState extends State<MapPage> {
                     ),
                     MarkerLayer(
                       markers: [
-                        // Hazard markers
                         ...hazards.map(
                           (h) => Marker(
-                            point: LatLng(
-                              (h['latitude'] as num).toDouble(),
-                              (h['longitude'] as num).toDouble(),
-                            ),
-                            width: 40,
-                            height: 40,
+                            point: LatLng((h['latitude'] as num).toDouble(),
+                                (h['longitude'] as num).toDouble()),
+                            width: 44,
+                            height: 44,
                             child: GestureDetector(
                               onTap: () => _showHazardSheet(h),
                               child: Container(
                                 decoration: BoxDecoration(
-                                  color:
-                                      _getColorForLevel(h['hazard_level']),
+                                  color: hazardColor(h['hazard_level']),
                                   shape: BoxShape.circle,
-                                  border: Border.all(
-                                      color: Colors.white, width: 2.5),
+                                  border:
+                                      Border.all(color: Colors.white, width: 3),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: _getColorForLevel(
-                                              h['hazard_level'])
-                                          .withOpacity(0.4),
-                                      blurRadius: 6,
-                                      offset: const Offset(0, 2),
-                                    ),
+                                        color: hazardColor(h['hazard_level'])
+                                            .withOpacity(0.4),
+                                        blurRadius: 6,
+                                        offset: const Offset(0, 2)),
                                   ],
                                 ),
                                 child: const Center(
-                                  child: Icon(
-                                    Icons.warning_rounded,
-                                    color: Colors.white,
-                                    size: 18,
-                                  ),
-                                ),
+                                    child: Icon(Icons.warning_rounded,
+                                        color: Colors.white, size: 20)),
                               ),
                             ),
                           ),
                         ),
-                        // Shelter markers
                         ...shelters.map(
                           (s) => Marker(
-                            point: LatLng(
-                              (s['latitude'] as num).toDouble(),
-                              (s['longitude'] as num).toDouble(),
-                            ),
-                            width: 42,
-                            height: 42,
+                            point: LatLng((s['latitude'] as num).toDouble(),
+                                (s['longitude'] as num).toDouble()),
+                            width: 46,
+                            height: 46,
                             child: GestureDetector(
                               onTap: () => _showShelterSheet(s),
                               child: Container(
                                 decoration: BoxDecoration(
                                   color: Colors.white,
                                   shape: BoxShape.circle,
-                                  border: Border.all(
-                                      color: kPrimary, width: 2.5),
+                                  border: Border.all(color: kPrimary, width: 3),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: kPrimary.withOpacity(0.3),
-                                      blurRadius: 6,
-                                      offset: const Offset(0, 2),
-                                    ),
+                                        color: kPrimary.withOpacity(0.3),
+                                        blurRadius: 6,
+                                        offset: const Offset(0, 2)),
                                   ],
                                 ),
                                 child: const Center(
-                                  child: Icon(
-                                    Icons.home_rounded,
-                                    color: kPrimary,
-                                    size: 20,
-                                  ),
-                                ),
+                                    child: Icon(Icons.home_rounded,
+                                        color: kPrimary, size: 22)),
                               ),
                             ),
                           ),
@@ -2147,23 +2079,21 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ],
                 ),
-                // Legend
                 Positioned(
                   left: 16,
                   right: 16,
                   bottom: 16,
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 14),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(14),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.08),
-                          blurRadius: 10,
-                          offset: const Offset(0, 2),
-                        ),
+                            color: Colors.black.withOpacity(0.08),
+                            blurRadius: 10,
+                            offset: const Offset(0, 2))
                       ],
                     ),
                     child: Row(
@@ -2175,30 +2105,27 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ),
                 ),
-                // Hazard count badge
                 Positioned(
                   top: 12,
                   right: 12,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.08),
-                          blurRadius: 8,
-                        ),
+                            color: Colors.black.withOpacity(0.08),
+                            blurRadius: 8)
                       ],
                     ),
                     child: Text(
                       '${hazards.length} hazard${hazards.length == 1 ? '' : 's'} · ${shelters.length} shelter${shelters.length == 1 ? '' : 's'}',
                       style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.black87,
-                      ),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black87),
                     ),
                   ),
                 ),
@@ -2212,13 +2139,15 @@ class _MapPageState extends State<MapPage> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
+            width: 12,
+            height: 12,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
         const SizedBox(width: 6),
         Text(label,
-            style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            style: const TextStyle(
+                fontSize: 13,
+                color: Colors.black54,
+                fontWeight: FontWeight.w500)),
       ],
     );
   }
@@ -2227,8 +2156,7 @@ class _MapPageState extends State<MapPage> {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
@@ -2237,27 +2165,24 @@ class _MapPageState extends State<MapPage> {
           children: [
             Center(
               child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2))),
             ),
             const SizedBox(height: 16),
             Text(
-              '${(hazard['damage_type'] ?? 'Unknown').toString().toUpperCase()}',
-              style: const TextStyle(
-                  fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+                '${(hazard['damage_type'] ?? 'Unknown').toString().toUpperCase()}',
+                style:
+                    const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             _detailRow('Hazard Level', hazard['hazard_level'] ?? 'Unknown'),
             _detailRow('Road Status', hazard['road_status'] ?? 'Unknown'),
+            _detailRow('Confidence',
+                '${(hazard['confidence'] * 100).toStringAsFixed(0)}%'),
             _detailRow(
-                'Confidence', '${(hazard['confidence'] * 100).toStringAsFixed(0)}%'),
-            _detailRow('Location',
-                '${hazard['latitude']}, ${hazard['longitude']}'),
+                'Location', '${hazard['latitude']}, ${hazard['longitude']}'),
             const SizedBox(height: 20),
           ],
         ),
@@ -2269,8 +2194,7 @@ class _MapPageState extends State<MapPage> {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
@@ -2279,32 +2203,29 @@ class _MapPageState extends State<MapPage> {
           children: [
             Center(
               child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2))),
             ),
             const SizedBox(height: 16),
             Row(
               children: [
                 Container(
-                  width: 40,
-                  height: 40,
+                  width: 42,
+                  height: 42,
                   decoration: BoxDecoration(
-                    color: kPrimaryLight.withOpacity(0.4),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.home_rounded, color: kPrimary, size: 20),
+                      color: kPrimaryLight.withOpacity(0.4),
+                      shape: BoxShape.circle),
+                  child:
+                      const Icon(Icons.home_rounded, color: kPrimary, size: 20),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Text(
-                    shelter['name'] ?? 'Unknown Shelter',
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
+                  child: Text(shelter['name'] ?? 'Unknown Shelter',
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
@@ -2330,8 +2251,8 @@ class _MapPageState extends State<MapPage> {
           Text(label,
               style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
           Text(value,
-              style: const TextStyle(
-                  fontSize: 14, fontWeight: FontWeight.w600)),
+              style:
+                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
         ],
       ),
     );
@@ -2345,7 +2266,6 @@ class _MapPageState extends State<MapPage> {
 class ProfilePage extends StatefulWidget {
   final int userId;
   final String userName;
-
   const ProfilePage({super.key, required this.userId, required this.userName});
 
   @override
@@ -2382,13 +2302,11 @@ class _ProfilePageState extends State<ProfilePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Profile',
-            style: TextStyle(fontWeight: FontWeight.w600)),
-      ),
+          title: const Text('Profile',
+              style: TextStyle(fontWeight: FontWeight.w600))),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
         children: [
-          // Profile card
           Container(
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
@@ -2402,9 +2320,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   width: 64,
                   height: 64,
                   decoration: BoxDecoration(
-                    color: kPrimary.withOpacity(0.1),
-                    shape: BoxShape.circle,
-                  ),
+                      color: kPrimary.withOpacity(0.1), shape: BoxShape.circle),
                   child: const Icon(Icons.person, color: kPrimary, size: 32),
                 ),
                 const SizedBox(width: 18),
@@ -2412,13 +2328,9 @@ class _ProfilePageState extends State<ProfilePage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        widget.userName,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
+                      Text(widget.userName,
+                          style: const TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.bold)),
                       const SizedBox(height: 4),
                       Container(
                         padding: const EdgeInsets.symmetric(
@@ -2432,10 +2344,9 @@ class _ProfilePageState extends State<ProfilePage> {
                         child: Text(
                           isGuest ? 'Guest' : 'Verified',
                           style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: isGuest ? Colors.grey : kPrimaryDark,
-                          ),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: isGuest ? Colors.grey : kPrimaryDark),
                         ),
                       ),
                     ],
@@ -2444,24 +2355,31 @@ class _ProfilePageState extends State<ProfilePage> {
               ],
             ),
           ),
-
           const SizedBox(height: 20),
-
-          // Stats
-          if (!isGuest) ...[
-            const Text(
-              'Statistics',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
+          if (isGuest) ...[
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  Navigator.pushAndRemoveUntil(
+                    context,
+                    MaterialPageRoute(builder: (_) => const LoginPage()),
+                    (route) => false,
+                  );
+                },
+                icon: const Icon(Icons.login),
+                label: const Text('Log in'),
               ),
             ),
+          ] else ...[
+            const Text('Statistics',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: Colors.grey.shade200),
               ),
               child: Row(
@@ -2470,57 +2388,45 @@ class _ProfilePageState extends State<ProfilePage> {
                     width: 44,
                     height: 44,
                     decoration: BoxDecoration(
-                      color: kPrimaryLight.withOpacity(0.4),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
+                        color: kPrimaryLight.withOpacity(0.4),
+                        borderRadius: BorderRadius.circular(10)),
                     child: const Icon(Icons.description_outlined,
                         color: kPrimary, size: 22),
                   ),
                   const SizedBox(width: 14),
                   const Expanded(
-                    child: Text(
-                      'Reports Submitted',
-                      style: TextStyle(fontWeight: FontWeight.w500),
-                    ),
-                  ),
+                      child: Text('Reports Submitted',
+                          style: TextStyle(fontWeight: FontWeight.w500))),
                   loadingCount
                       ? const SizedBox(
                           width: 16,
                           height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Text(
-                          '$reportCount',
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : Text('$reportCount',
                           style: const TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                            color: kPrimary,
-                          ),
-                        ),
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                              color: kPrimary)),
                 ],
               ),
             ),
-          ],
-
-          const SizedBox(height: 32),
-
-          // Logout
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () {
-                ApiService.logout();
-                Navigator.pushAndRemoveUntil(
-                  context,
-                  MaterialPageRoute(builder: (_) => const LoginPage()),
-                  (route) => false,
-                );
-              },
-              icon: const Icon(Icons.logout),
-              label: const Text('Logout',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 32),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  ApiService.logout();
+                  Navigator.pushAndRemoveUntil(
+                    context,
+                    MaterialPageRoute(builder: (_) => const WelcomePage()),
+                    (route) => false,
+                  );
+                },
+                icon: const Icon(Icons.logout),
+                label: const Text('Logout'),
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );

@@ -134,17 +134,16 @@ def require_auth(f):
 # Run the app once and check the printed "classes = {...}" output at startup
 # to see the real names, then fix this dict.
 CLASS_INFO = {
-    # flood_best.pt classes
-    'flood':        {'hazard_level': 'danger',   'road_status': 'Blocked'},
-    'waterlogging': {'hazard_level': 'moderate', 'road_status': 'Partially blocked'},
+    # flood_best.pt
+    'flood':              {'hazard_level': 'danger',   'road_status': 'Blocked'},
 
-    # hazard_best.pt classes
-    'pothole':      {'hazard_level': 'moderate', 'road_status': 'Passable with caution'},
-    'landslide':    {'hazard_level': 'danger',   'road_status': 'Blocked'},
+    # hazard_best.pt — generic "Hazard" class carries no severity info,
+    # so default to the cautious end rather than reassuring the user.
+    'hazard':             {'hazard_level': 'danger', 'road_status': 'Use extreme caution — hazard type unclear'},
 
-    # hazard_fire_building_best.pt classes
-    'fire':         {'hazard_level': 'danger',   'road_status': 'Blocked'},
-    'collapse':     {'hazard_level': 'danger',   'road_status': 'Blocked'},
+    # hazard_fire_building_best.pt
+    'fire':               {'hazard_level': 'danger',   'road_status': 'Blocked'},
+    'collapsed_building': {'hazard_level': 'danger',   'road_status': 'Blocked'},
 }
 
 def analyze_damage_with_yolo(image_path):
@@ -175,7 +174,7 @@ def analyze_damage_with_yolo(image_path):
                     label = model.names[cls_id]
                     if conf > best_conf:
                         best_conf = conf
-                        best_label = label
+                        best_label = label.lower()
 
         if best_label is None:
             # No detections above threshold in any model
@@ -351,61 +350,82 @@ def upload_report():
     Inserts into: uploaded_image + detection_result (+ optionally disaster).
     """
     try:
+        print("🔵 [1] Route entered")
+
         if 'image' not in request.files:
             return jsonify({"error": "No image provided"}), 400
+        print("🔵 [2] Image found in request")
 
         file = request.files['image']
         latitude = float(request.form.get('latitude', 19.2456))
         longitude = float(request.form.get('longitude', 73.1300))
-        user_id = request.user_id  # From JWT token
+        user_id = request.user_id
+        print(f"🔵 [3] Parsed form data: lat={latitude}, lng={longitude}, user_id={user_id}")
 
-        # Save image temporarily
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
             file.save(tmp.name)
             image_path = tmp.name
+        print(f"🔵 [4] Saved temp file at {image_path}")
 
-        # Analyze with YOLO
         analysis = analyze_damage_with_yolo(image_path)
+        print(f"🔵 [5] YOLO analysis complete: {analysis}")
 
-        # User-provided description (from additional info field)
         user_description = request.form.get('description', '')
         description = user_description if user_description else f"Auto-detected: {analysis['damage_type']} - {analysis['road_status']}"
+        print("🔵 [6] Description built, starting DB transaction")
 
-        # 1) Create a disaster record
-        disaster_result = query_db(
-            """
-            INSERT INTO disaster (type, severity, description, start_time, status)
-            VALUES (%s, %s, %s, NOW(), 'active')
-            """,
-            (analysis['damage_type'], analysis['hazard_level'], description),
-            fetch=False
-        )
-        # Get the last inserted disaster_id
-        disaster_id = query_db("SELECT LAST_INSERT_ID() AS id")
-        disaster_id = disaster_id[0]['id'] if disaster_id else None
+        conn = get_db_connection()
+        if not conn:
+            print("🔴 [ERROR] DB connection failed")
+            return jsonify({"error": "Database connection failed"}), 500
+        print("🔵 [7] DB connected")
 
-        # 2) Insert into uploaded_image
-        img_result = query_db(
-            """
-            INSERT INTO uploaded_image (user_id, disaster_id, image_url, latitude, longitude, status)
-            VALUES (%s, %s, %s, %s, %s, 'approved')
-            """,
-            (user_id, disaster_id, image_path, latitude, longitude),
-            fetch=False
-        )
-        image_id = query_db("SELECT LAST_INSERT_ID() AS id")
-        image_id = image_id[0]['id'] if image_id else None
+        try:
+            cursor = conn.cursor(dictionary=True)
 
-        # 3) Insert detection result
-        det_result = query_db(
-            """
-            INSERT INTO detection_result (image_id, damage_type, severity, confidence, road_status)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (image_id, analysis['damage_type'], analysis['hazard_level'],
-             analysis['confidence'], analysis['road_status']),
-            fetch=False
-        )
+            cursor.execute(
+                """
+                INSERT INTO disaster (type, severity, description, start_time, status)
+                VALUES (%s, %s, %s, NOW(), 'active')
+                """,
+                (analysis['damage_type'], analysis['hazard_level'], description),
+            )
+            disaster_id = cursor.lastrowid
+            print(f"🔵 [8] Disaster inserted, id={disaster_id}")
+
+            cursor.execute(
+                """
+                INSERT INTO uploaded_image (user_id, disaster_id, image_url, latitude, longitude, status)
+                VALUES (%s, %s, %s, %s, %s, 'approved')
+                """,
+                (user_id, disaster_id, image_path, latitude, longitude),
+            )
+            image_id = cursor.lastrowid
+            print(f"🔵 [9] Image row inserted, id={image_id}")
+
+            cursor.execute(
+                """
+                INSERT INTO detection_result (image_id, damage_type, severity, confidence, road_status)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (image_id, analysis['damage_type'], analysis['hazard_level'],
+                 analysis['confidence'], analysis['road_status']),
+            )
+            print("🔵 [10] Detection result inserted")
+
+            conn.commit()
+            print("🔵 [11] Transaction committed")
+            img_result = 1
+        except Error as e:
+            conn.rollback()
+            print(f"🔴 [ERROR] Transaction failed: {e}")
+            traceback.print_exc()
+            img_result = None
+        finally:
+            cursor.close()
+            conn.close()
+
+        print("🔵 [12] About to return response")
 
         if img_result and img_result > 0:
             return jsonify({
@@ -418,7 +438,7 @@ def upload_report():
             return jsonify({"error": "Failed to store report"}), 400
 
     except Exception as e:
-        print(f"Upload error: {e}")
+        print(f"🔴 [FATAL] Unhandled exception: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -572,4 +592,4 @@ if __name__ == '__main__':
     print(f"✓ JWT Auth: Enabled (token expires in {JWT_EXPIRY_HOURS}h)")
     print("✓ Running on http://0.0.0.0:5000")
     print("=" * 60)
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
