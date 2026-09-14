@@ -45,5 +45,14 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SafeSense needs your location to find nearby hazards and shelters.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>SafeSense needs your location to find nearby hazards and shelters.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SafeSense needs camera access to photograph hazards.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SafeSense needs photo access to upload hazard images.</string>
 </dict>
 </plist>

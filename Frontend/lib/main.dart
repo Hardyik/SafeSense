@@ -1,12 +1,13 @@
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:geolocator/geolocator.dart';
 
 void main() {
   runApp(const SafeSenseApp());
@@ -29,9 +30,10 @@ const Color kBg = Color(0xFFF4F6F9);
 // ============================================================
 
 class ApiService {
-  static const String baseUrl = 'http://localhost:5000';
+  static const String baseUrl = 'http://192.168.0.101:5000';
+  // For web on same machine: 'http://localhost:5000'
   // For Android emulator: 'http://10.0.2.2:5000'
-  // For physical device: 'http://192.168.X.X:5000'
+  // For physical device on WiFi: use your computer's IP (ipconfig)
 
   static String? _authToken;
 
@@ -570,6 +572,15 @@ class _LoginPageState extends State<LoginPage> {
                           children: [
                             TextSpan(
                               text: 'Sign up',
+                              recognizer: TapGestureRecognizer()
+                                ..onTap = () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => const RegisterPage(),
+                                    ),
+                                  );
+                                },
                               style: TextStyle(
                                 color: Theme.of(context)
                                     .colorScheme
@@ -1376,7 +1387,51 @@ class _UploadPageState extends State<UploadPage> {
     super.dispose();
   }
 
+  bool _locating = false;
+
+  Future<void> _getCurrentLocation() async {
+    setState(() => _locating = true);
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        _showMessage('Location services are disabled. Please enable GPS.', isError: true);
+        setState(() => _locating = false);
+        return;
+      }
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          _showMessage('Location permission denied', isError: true);
+          setState(() => _locating = false);
+          return;
+        }
+      }
+      if (permission == LocationPermission.deniedForever) {
+        _showMessage('Location permission permanently denied. Enable in settings.', isError: true);
+        setState(() => _locating = false);
+        return;
+      }
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+      setState(() {
+        latController.text = position.latitude.toStringAsFixed(6);
+        lngController.text = position.longitude.toStringAsFixed(6);
+        _locating = false;
+      });
+      _showMessage('Location updated!');
+    } catch (e) {
+      setState(() => _locating = false);
+      _showMessage('Could not get location: ', isError: true);
+    }
+  }
+
   Future<void> pickImage(ImageSource source) async {
+    if (kIsWeb && source == ImageSource.camera) {
+      _showMessage('Camera works best on mobile. On desktop, use Gallery.');
+    }
     final picker = ImagePicker();
     final image = await picker.pickImage(
       source: source,
@@ -1619,6 +1674,20 @@ class _UploadPageState extends State<UploadPage> {
                       contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     ),
                     style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  decoration: BoxDecoration(
+                    color: kPrimaryLight.withOpacity(0.3),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: IconButton(
+                    onPressed: _locating ? null : _getCurrentLocation,
+                    icon: _locating
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: kPrimary))
+                        : const Icon(Icons.my_location, color: kPrimary, size: 22),
+                    tooltip: 'Get current location',
                   ),
                 ),
               ],

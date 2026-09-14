@@ -22,7 +22,7 @@ else:
     print(f"⚠ .env not found at {dotenv_path}, using system env vars")
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*", "allow_headers": ["Authorization", "Content-Type"], "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 
 # ========== CONFIGURATION ==========
 DB_HOST = os.getenv('DB_HOST', 'localhost')
