@@ -1,0 +1,7 @@
+# Env files
+.env
+.env.*
+
+# build folders/Libraries
+venv/
+backend/venv/
