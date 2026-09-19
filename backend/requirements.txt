@@ -1,0 +1,8 @@
+flask==3.1.1
+flask-cors==5.0.1
+python-dotenv==1.1.0
+mysql-connector-python==9.3.0
+bcrypt==4.3.0
+PyJWT==2.10.1
+ultralytics==8.4.150
+opencv-python==5.0.0.93
