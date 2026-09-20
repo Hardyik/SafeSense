@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS detection_result (
     damage_type VARCHAR(50),
     severity VARCHAR(20),
     confidence FLOAT,
-    road_status VARCHAR(30),
+    road_status VARCHAR(100),
     detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (image_id) REFERENCES uploaded_image(image_id)
 );

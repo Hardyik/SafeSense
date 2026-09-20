@@ -48,10 +48,28 @@ try:
         print(f"  - {name}: classes = {m.names}")
 except ImportError:
     YOLO_AVAILABLE = False
+    MODEL_DIR = Path(__file__).parent / 'ai_model'
     print("⚠ YOLOv8 not installed. Install with: pip install ultralytics opencv-python")
 except Exception as e:
     YOLO_AVAILABLE = False
+    MODEL_DIR = Path(__file__).parent / 'ai_model'
     print(f"⚠ YOLO warning: {e}")
+
+# Teachable Machine classifier — fast first-pass check across 6 categories
+# (Earthquake, Smoke, Normal, Landslide, Flood, Fire)
+try:
+    from tensorflow.keras.models import load_model
+    from PIL import Image, ImageOps
+    import numpy as np
+
+    TM_MODEL = load_model(str(MODEL_DIR / 'keras_model.h5'), compile=False)
+    with open(MODEL_DIR / 'labels.txt', 'r') as f:
+        TM_CLASS_NAMES = [line.strip() for line in f.readlines()]
+    TM_AVAILABLE = True
+    print(f"✓ Teachable Machine classifier loaded: {TM_CLASS_NAMES}")
+except Exception as e:
+    TM_AVAILABLE = False
+    print(f"⚠ Teachable Machine model not loaded: {e}")
 
 # ========== DATABASE HELPERS ==========
 def get_db_connection():
@@ -128,30 +146,82 @@ def require_auth(f):
     return decorated
 
 
-# ========== YOLO DAMAGE DETECTION ==========
+# ========== HAZARD DETECTION ==========
 # Map each model's class names -> (hazard_level, road_status)
-# ⚠️ EDIT THESE to match the actual class names your models were trained on.
-# Run the app once and check the printed "classes = {...}" output at startup
-# to see the real names, then fix this dict.
 CLASS_INFO = {
     # flood_best.pt
     'flood':              {'hazard_level': 'danger',   'road_status': 'Blocked'},
 
-    # hazard_best.pt — generic "Hazard" class carries no severity info,
-    # so default to the cautious end rather than reassuring the user.
-    'hazard':             {'hazard_level': 'danger', 'road_status': 'Use extreme caution — hazard type unclear'},
+    # hazard_best.pt — trained specifically on earthquake damage
+    'hazard':              {'hazard_level': 'danger',   'road_status': 'Structural damage — avoid area'},
 
     # hazard_fire_building_best.pt
-    'fire':               {'hazard_level': 'danger',   'road_status': 'Blocked'},
-    'collapsed_building': {'hazard_level': 'danger',   'road_status': 'Blocked'},
+    'fire':                {'hazard_level': 'danger',   'road_status': 'Blocked'},
+    'collapsed_building':  {'hazard_level': 'danger',   'road_status': 'Blocked'},
+
+    # Teachable Machine classifier — categories not covered by the YOLO models
+    'earthquake':          {'hazard_level': 'danger',   'road_status': 'Structural damage — avoid area'},
+    'smoke':                {'hazard_level': 'moderate', 'road_status': 'Reduced visibility — proceed with caution'},
+    'landslide':            {'hazard_level': 'danger',   'road_status': 'Blocked'},
 }
+
+def classify_with_teachable_machine(image_path):
+    """
+    Runs the Teachable Machine Keras classifier on the image.
+    Returns (label_lowercase, confidence) or (None, 0.0) if unavailable.
+    Labels file lines look like '0 Earthquake', so we strip the index prefix.
+    """
+    if not TM_AVAILABLE:
+        return None, 0.0
+    try:
+        data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
+        image = Image.open(image_path).convert("RGB")
+        image = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
+        image_array = np.asarray(image)
+        normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
+        data[0] = normalized_image_array
+
+        prediction = TM_MODEL.predict(data, verbose=0)
+        index = np.argmax(prediction)
+        raw_label = TM_CLASS_NAMES[index]
+        # Strip leading index like "0 " from "0 Earthquake"
+        label = raw_label.split(' ', 1)[-1].strip().lower() if ' ' in raw_label else raw_label.strip().lower()
+        confidence = float(prediction[0][index])
+        return label, confidence
+    except Exception as e:
+        print(f"⚠ Teachable Machine classify error: {e}")
+        traceback.print_exc()
+        return None, 0.0
 
 def analyze_damage_with_yolo(image_path):
     """
-    Run all trained YOLO models on the image, keep the single
-    highest-confidence detection across all of them.
+    Fast first pass: Teachable Machine classifier.
+    If it confidently says "normal", skip YOLO entirely and return safe
+    (big speed win for the common case where nothing's actually wrong).
+    Otherwise, run all trained YOLO models too and keep whichever single
+    result (YOLO or Teachable Machine) is more confident.
     """
+    tm_label, tm_conf = classify_with_teachable_machine(image_path)
+
+    if tm_label == 'normal' and tm_conf > 0.6:
+        return {
+            'damage_type': 'none',
+            'hazard_level': 'safe',
+            'confidence': round(tm_conf, 2),
+            'road_status': 'Clear'
+        }
+
     if not YOLO_AVAILABLE:
+        # Fall back to whatever the Teachable Machine classifier found,
+        # since YOLO isn't available to double-check.
+        if tm_label:
+            info = CLASS_INFO.get(tm_label, {'hazard_level': 'moderate', 'road_status': 'Unknown'})
+            return {
+                'damage_type': tm_label,
+                'hazard_level': info['hazard_level'],
+                'confidence': round(tm_conf, 2),
+                'road_status': info['road_status']
+            }
         return {
             'damage_type': 'flood',
             'hazard_level': 'moderate',
@@ -176,8 +246,15 @@ def analyze_damage_with_yolo(image_path):
                         best_conf = conf
                         best_label = label.lower()
 
+        # Fold in the Teachable Machine result as one more candidate,
+        # unless it's the (already-handled) "normal" case.
+        if tm_label and tm_label != 'normal' and tm_conf > best_conf:
+            best_conf = tm_conf
+            best_label = tm_label
+
         if best_label is None:
-            # No detections above threshold in any model
+            # No detections above threshold from YOLO, and Teachable
+            # Machine didn't find anything confident either.
             return {
                 'damage_type': 'none',
                 'hazard_level': 'safe',
@@ -212,7 +289,8 @@ def home():
         "message": "SafeSense Backend is running!",
         "status": "OK",
         "version": "1.0.0",
-        "yolo_available": YOLO_AVAILABLE
+        "yolo_available": YOLO_AVAILABLE,
+        "teachable_machine_available": TM_AVAILABLE
     })
 
 @app.route('/test-db')
@@ -346,7 +424,8 @@ def register():
 @require_auth
 def upload_report():
     """
-    Upload an image, analyze with YOLOv8, store report in database.
+    Upload an image, analyze with the Teachable Machine classifier and
+    YOLOv8 models, store report in database.
     Inserts into: uploaded_image + detection_result (+ optionally disaster).
     """
     try:
@@ -368,7 +447,7 @@ def upload_report():
         print(f"🔵 [4] Saved temp file at {image_path}")
 
         analysis = analyze_damage_with_yolo(image_path)
-        print(f"🔵 [5] YOLO analysis complete: {analysis}")
+        print(f"🔵 [5] Analysis complete: {analysis}")
 
         user_description = request.form.get('description', '')
         description = user_description if user_description else f"Auto-detected: {analysis['damage_type']} - {analysis['road_status']}"
@@ -589,7 +668,8 @@ if __name__ == '__main__':
     print("=" * 60)
     print(f"✓ Database: {DB_HOST} / {DB_NAME} (user: {DB_USER}, pass: {'***' if DB_PASSWORD else '(empty)'})")
     print(f"✓ YOLOv8: {'Available' if YOLO_AVAILABLE else 'Not installed (optional)'}")
+    print(f"✓ Teachable Machine: {'Available' if TM_AVAILABLE else 'Not installed (optional)'}")
     print(f"✓ JWT Auth: Enabled (token expires in {JWT_EXPIRY_HOURS}h)")
     print("✓ Running on http://0.0.0.0:5000")
     print("=" * 60)
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
