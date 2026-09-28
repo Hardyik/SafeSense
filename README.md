@@ -126,6 +126,58 @@ flutter run
 
 You can run it on an Android emulator, physical Android device, or another Flutter-supported platform.
 
+### Point the app at your backend
+
+The backend address defaults to `http://10.0.2.2:5000` (Android emulator →
+your PC). For a **physical device** on the same WiFi, pass your PC's LAN IP:
+
+```bash
+flutter run --dart-define=API_BASE_URL=http://192.168.1.20:5000
+```
+
+(`ipconfig` / `ifconfig` to find it. Set it once in
+`lib/config/app_config.dart` if you don't want to pass the flag every run.)
+
+## 📱 Building the release APK (phone over same WiFi)
+
+The manifest already allows plain-HTTP LAN traffic
+(`android:usesCleartextTraffic="true"`), so the release build can talk to
+your local Flask backend directly.
+
+1. **Find your PC's WiFi IP** (Windows):
+
+   ```bat
+   ipconfig   →  look for "Wireless LAN adapter Wi-Fi" → IPv4 Address, e.g. 192.168.1.20
+   ```
+
+2. **Allow Flask through Windows Firewall** (first run usually prompts —
+   tick "Private networks"; if you missed the prompt):
+
+   ```bat
+   netsh advfirewall firewall add rule name="SafeSense Flask 5000" dir=in action=allow protocol=TCP localport=5000
+   ```
+
+3. **Build the APK with your PC's IP baked in:**
+
+   ```bash
+   cd Frontend
+   flutter build apk --release \
+     --dart-define=API_BASE_URL=http://192.168.1.20:5000
+   ```
+
+   The APK lands at `build/app/outputs/flutter-apk/app-release.apk`.
+   Install it on the phone (both devices on the **same WiFi**), log in,
+   and it hits your PC's MySQL-backed Flask server directly.
+
+   > Phone and PC must be on the same WiFi network. If the phone is on
+   > mobile data or a different network, it cannot reach `192.168.x.x` —
+   > that's how LAN addressing works, not an app bug.
+
+4. **Requires the Android SDK.** Install Android Studio (or command-line
+   tools + `sdkmanager "platform-tools" "platforms;android-35"
+   "build-tools;34.0.0"`) if `flutter doctor` shows the Android toolchain
+   as missing.
+
 ---
 
 ## 🖥️ Setup Backend
@@ -172,6 +224,11 @@ DB_NAME=safesense
 
 JWT_SECRET=your_secret_key
 JWT_EXPIRY_HOURS=24
+
+# Optional — seeds the first admin at startup so you can promote
+# others from the app's Admin Dashboard.
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=change-me
 ```
 
 > Do not upload your `.env` file or database password to GitHub.
@@ -193,6 +250,31 @@ Backend/schema.sql
 ```
 
 Import the schema into your MySQL database.
+
+**Already have an older database?** Run the migration instead of re-importing:
+
+```bash
+mysql -u root -p safesense < Backend/migrations/001_add_new_tables.sql
+```
+
+It adds the new tables the app now uses (emergency contacts, location
+shares, emergency alerts, risk zones) and widens `uploaded_image` for
+locally-stored photos.
+
+## 🏗️ Fully Local Architecture
+
+This build is **100% local — no Firebase, no Cloudinary, no Cloudflare**:
+
+| Concern | Old (Firebase era) | Now |
+|---|---|---|
+| Auth | Firebase Auth | Flask JWT + `user` table |
+| Reports/shelters | Firestore | MySQL via `/api/*` |
+| Report photos | Cloudinary | `Backend/uploads/` served at `/uploads/<file>` |
+| Push alerts | FCM + Cloudflare Worker | in-app poller (`/api/alerts`) |
+| Admin actions | Firestore rules + Worker | `@require_admin` routes |
+
+Report photos start as `pending` and appear on the public map only after
+an admin verifies them in the Admin Dashboard (Reports tab).
 
 ## ▶️ Start the Backend
 

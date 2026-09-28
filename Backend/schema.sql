@@ -46,12 +46,16 @@ CREATE TABLE IF NOT EXISTS disaster (
 
 -- ============================================================
 -- UPLOADED IMAGE
+-- image_url stores a relative path like 'uploads/<uuid>.jpg' served by
+-- GET /uploads/<filename>; status starts 'pending' and an admin flips it
+-- to 'verified'/'rejected' from the Admin Dashboard (Reports tab).
 -- ============================================================
 CREATE TABLE IF NOT EXISTS uploaded_image (
     image_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT,
     disaster_id INT,
-    image_url VARCHAR(255),
+    image_url VARCHAR(500),
+    description TEXT,
     latitude FLOAT,
     longitude FLOAT,
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -76,12 +80,16 @@ CREATE TABLE IF NOT EXISTS detection_result (
 
 -- ============================================================
 -- ZONE RISK
+-- zone_id is AUTO_INCREMENT so admins can create zones from the app
+-- without picking IDs manually. boundaries_poly holds a JSON array of
+-- [lat, lng] pairs — produced by POST /api/admin/risk-zones.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS zone_risk (
-    zone_id INT PRIMARY KEY,
+    zone_id INT AUTO_INCREMENT PRIMARY KEY,
     boundaries_poly TEXT,
     risk_level VARCHAR(20),
-    status VARCHAR(20),
+    disaster_type VARCHAR(50),
+    status VARCHAR(20) DEFAULT 'active',
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -114,6 +122,52 @@ CREATE TABLE IF NOT EXISTS evacuation_route (
     FOREIGN KEY (zone_id) REFERENCES zone_risk(zone_id),
     FOREIGN KEY (shelter_id) REFERENCES shelter(shelter_id),
     FOREIGN KEY (user_id) REFERENCES user(user_id)
+);
+
+-- ============================================================
+-- EMERGENCY CONTACT (per-user quick-dial contacts — Section 9)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS emergency_contact (
+    contact_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    phone VARCHAR(30) NOT NULL,
+    relationship VARCHAR(100) DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user(user_id) ON DELETE CASCADE
+);
+
+-- ============================================================
+-- LOCATION SHARE (temporary location sharing — Section 10)
+-- Explicit start/stop, auto-expires via expires_at.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS location_share (
+    share_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    latitude FLOAT,
+    longitude FLOAT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    active TINYINT(1) DEFAULT 1,
+    FOREIGN KEY (user_id) REFERENCES user(user_id) ON DELETE CASCADE
+);
+
+-- ============================================================
+-- EMERGENCY ALERT (admin broadcast alerts — Section 11)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS emergency_alert (
+    alert_id INT AUTO_INCREMENT PRIMARY KEY,
+    disaster_type VARCHAR(50),
+    severity VARCHAR(20),
+    affected_area VARCHAR(200),
+    description TEXT,
+    recommended_action TEXT,
+    status VARCHAR(20) DEFAULT 'active',
+    created_by INT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME,
+    FOREIGN KEY (created_by) REFERENCES user(user_id)
 );
 
 -- ============================================================

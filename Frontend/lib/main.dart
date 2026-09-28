@@ -1,15 +1,32 @@
 import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'services/auth_service.dart';
+import 'services/firestore_service.dart';
+import 'services/notification_service.dart';
+import 'services/routing_service.dart';
+import 'services/theme_service.dart';
+import 'theme/app_theme.dart';
+import 'emergency_mode_page.dart';
+import 'report_history_page.dart';
+import 'settings_page.dart';
+import 'splash_screen.dart';
+import 'admin_dashboard_page.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Fully local stack: no Firebase. Restore the persisted JWT session
+  // (shared_preferences) before the UI builds so WelcomePage can skip
+  // ahead for a returning signed-in user.
+  await AuthService.instance.restoreSession();
+  await NotificationService.instance.init();
+  await ThemeService.instance.load();
   runApp(const SafeSenseApp());
 }
 
@@ -19,16 +36,21 @@ void main() {
 // Design goal: this is an EMERGENCY app. Every screen should answer
 // "what do I do right now?" in under 2 seconds. Big touch targets,
 // big text, minimal steps, color = meaning (never decoration only).
+//
+// These constants now point at AppColors (lib/theme/app_theme.dart) —
+// the SafeSense brand palette (Section 25) — rather than defining their
+// own hex values. Kept as top-level `k*` names so the ~40 existing call
+// sites throughout this file didn't need touching to pick up the new
+// brand colors; new code should prefer AppColors.* directly.
 
-const Color kPrimary = Color(0xFF087F8C); // calm brand / trust
-const Color kPrimaryDark = Color(0xFF065F68);
-const Color kPrimaryLight = Color(0xFFB2EBF2);
-const Color kDanger =
-    Color(0xFFD32F2F); // slightly deeper red = more legible on white
-const Color kWarning = Color(0xFFF57C00);
-const Color kSafe = Color(0xFF2E7D32);
-const Color kBg = Color(0xFFF4F6F9);
-const Color kInk = Color(0xFF1A1A1A);
+const Color kPrimary = AppColors.safetyCyan;
+const Color kPrimaryDark = AppColors.deepNavy;
+const Color kPrimaryLight = AppColors.lightCyan;
+const Color kDanger = AppColors.danger;
+const Color kWarning = AppColors.warning;
+const Color kSafe = AppColors.safe;
+const Color kBg = AppColors.lightBg;
+const Color kInk = AppColors.mainTextLight;
 
 // Shared helpers so every screen agrees on what a color/icon means.
 Color hazardColor(String? level) {
@@ -71,299 +93,33 @@ String titleCase(String? s) {
 }
 
 // ============================================================
-// API SERVICE (unchanged logic — only the transport layer)
-// ============================================================
-
-class ApiService {
-  static const String baseUrl = 'http://localhost:5000';
-  // For Android emulator: 'http://10.0.2.2:5000'
-  // For physical device on WiFi: use your computer's IP (ipconfig/ifconfig)
-
-  static String? _authToken;
-
-  static void setToken(String? token) {
-    _authToken = token;
-  }
-
-  static String? get token => _authToken;
-
-  static Map<String, String> _authHeaders() {
-    final headers = <String, String>{
-      'Content-Type': 'application/json',
-    };
-    if (_authToken != null) {
-      headers['Authorization'] = 'Bearer $_authToken';
-    }
-    return headers;
-  }
-
-  static Map<String, String> _multipartHeaders() {
-    final headers = <String, String>{};
-    if (_authToken != null) {
-      headers['Authorization'] = 'Bearer $_authToken';
-    }
-    return headers;
-  }
-
-  static Future<Map<String, dynamic>> login(
-      String email, String password) async {
-    try {
-      final response = await http
-          .post(
-            Uri.parse('$baseUrl/api/auth/login'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'email': email, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['token'] != null) {
-          _authToken = data['token'];
-        }
-        return data;
-      } else {
-        return {
-          'status': 'error',
-          'error': 'Login failed: ${response.statusCode}'
-        };
-      }
-    } catch (e) {
-      return {'status': 'error', 'error': 'Network error: $e'};
-    }
-  }
-
-  static Future<Map<String, dynamic>> register({
-    required String email,
-    required String password,
-    required String name,
-    String? phone,
-  }) async {
-    try {
-      final response = await http
-          .post(
-            Uri.parse('$baseUrl/api/auth/register'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'email': email,
-              'password': password,
-              'name': name,
-              'phone': phone ?? '',
-            }),
-          )
-          .timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 201 || response.statusCode == 200) {
-        return jsonDecode(response.body);
-      } else {
-        return {'status': 'error', 'error': 'Registration failed'};
-      }
-    } catch (e) {
-      return {'status': 'error', 'error': 'Network error: $e'};
-    }
-  }
-
-  static Future<Map<String, dynamic>> uploadReport({
-    required Uint8List imageBytes,
-    required String fileName,
-    required double latitude,
-    required double longitude,
-    int? userId,
-    String? description,
-  }) async {
-    try {
-      final uri = Uri.parse('$baseUrl/api/reports/upload');
-      final request = http.MultipartRequest('POST', uri);
-      request.headers.addAll(_multipartHeaders());
-
-      request.files.add(
-        http.MultipartFile.fromBytes('image', imageBytes, filename: fileName),
-      );
-
-      request.fields['latitude'] = latitude.toString();
-      request.fields['longitude'] = longitude.toString();
-
-      if (userId != null && userId > 0) {
-        request.fields['user_id'] = userId.toString();
-      }
-      if (description != null && description.isNotEmpty) {
-        request.fields['description'] = description;
-      }
-
-      final response =
-          await request.send().timeout(const Duration(seconds: 30));
-      final body = await response.stream.bytesToString();
-
-      if (response.statusCode == 201 || response.statusCode == 200) {
-        return jsonDecode(body);
-      } else {
-        return {'status': 'error', 'error': 'Upload failed'};
-      }
-    } catch (e) {
-      return {'status': 'error', 'error': 'Network error: $e'};
-    }
-  }
-
-  static Future<List<dynamic>> getHazards() async {
-    try {
-      final response = await http
-          .get(Uri.parse('$baseUrl/api/reports/hazards'))
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['hazards'] as List<dynamic>? ?? [];
-      }
-      return [];
-    } catch (e) {
-      return [];
-    }
-  }
-
-  static Future<List<dynamic>> getNearbyHazards(
-    double latitude,
-    double longitude, {
-    double radiusKm = 5,
-  }) async {
-    try {
-      final response = await http
-          .get(Uri.parse(
-              '$baseUrl/api/reports/nearby?lat=$latitude&lng=$longitude&radius=$radiusKm'))
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['nearby_hazards'] as List<dynamic>? ?? [];
-      }
-      return [];
-    } catch (e) {
-      return [];
-    }
-  }
-
-  static Future<Map<String, dynamic>> getNearestShelter(
-    double latitude,
-    double longitude,
-  ) async {
-    try {
-      final response = await http
-          .get(Uri.parse(
-              '$baseUrl/api/shelters/nearest?lat=$latitude&lng=$longitude'))
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['nearest_shelter'] as Map<String, dynamic>? ?? {};
-      }
-      return {};
-    } catch (e) {
-      return {};
-    }
-  }
-
-  static Future<int> getUserReportCount(int userId) async {
-    try {
-      final response = await http
-          .get(
-            Uri.parse('$baseUrl/api/reports/user/$userId'),
-            headers: _authHeaders(),
-          )
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return (data['reports'] as List<dynamic>?)?.length ?? 0;
-      }
-      return 0;
-    } catch (e) {
-      return 0;
-    }
-  }
-
-  static void logout() {
-    _authToken = null;
-  }
-}
-
-// ============================================================
 // APP
 // ============================================================
+
+// Lets NotificationService show a SnackBar for polled emergency alerts
+// without needing a BuildContext of its own (replaces the foreground FCM
+// banner path from the Firebase version).
+final GlobalKey<ScaffoldMessengerState> rootScaffoldMessengerKey =
+    GlobalKey<ScaffoldMessengerState>();
 
 class SafeSenseApp extends StatelessWidget {
   const SafeSenseApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'SafeSense',
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: kBg,
-        fontFamily: 'Roboto',
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: kPrimary,
-          brightness: Brightness.light,
-        ),
-        textTheme: const TextTheme(
-          bodyMedium: TextStyle(fontSize: 16, height: 1.4),
-          bodyLarge: TextStyle(fontSize: 17, height: 1.4),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.white,
-          foregroundColor: Colors.black87,
-          elevation: 0,
-          centerTitle: true,
-          surfaceTintColor: Colors.transparent,
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: kPrimary,
-            foregroundColor: Colors.white,
-            elevation: 0,
-            minimumSize: const Size.fromHeight(58),
-            textStyle:
-                const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-        ),
-        outlinedButtonTheme: OutlinedButtonThemeData(
-          style: OutlinedButton.styleFrom(
-            foregroundColor: kPrimary,
-            minimumSize: const Size.fromHeight(58),
-            textStyle:
-                const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-            side: const BorderSide(color: kPrimary, width: 1.5),
-          ),
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.white,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: Colors.grey.shade300),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: Colors.grey.shade300),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: kPrimary, width: 2),
-          ),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        ),
-        cardTheme: CardThemeData(
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: BorderSide(color: Colors.grey.shade200),
-          ),
-        ),
-      ),
-      home: const WelcomePage(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: ThemeService.instance.themeMode,
+      builder: (context, mode, _) {
+        return MaterialApp(
+          scaffoldMessengerKey: rootScaffoldMessengerKey,
+          debugShowCheckedModeBanner: false,
+          title: 'SafeSense',
+          theme: AppTheme.light,
+          darkTheme: AppTheme.dark,
+          themeMode: mode,
+          home: const SplashScreen(),
+        );
+      },
     );
   }
 }
@@ -375,8 +131,36 @@ class SafeSenseApp extends StatelessWidget {
 // small secondary link for people who want to report hazards.
 // ============================================================
 
-class WelcomePage extends StatelessWidget {
+class WelcomePage extends StatefulWidget {
   const WelcomePage({super.key});
+
+  @override
+  State<WelcomePage> createState() => _WelcomePageState();
+}
+
+class _WelcomePageState extends State<WelcomePage> {
+  @override
+  void initState() {
+    super.initState();
+    // AuthService restores the persisted JWT session at startup
+    // (restoreSession in main), so a returning signed-in user shouldn't
+    // have to tap through Welcome -> Login again.
+    final user = AuthService.instance.currentUser;
+    if (user != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => HomePage(
+              userId: user.uid,
+              userName: user.name ?? 'User',
+            ),
+          ),
+        );
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -398,16 +182,23 @@ class WelcomePage extends StatelessWidget {
                     size: 52, color: Colors.white),
               ),
               const SizedBox(height: 20),
-              const Text(
+              Text(
                 'SafeSense',
                 style: TextStyle(
-                    fontSize: 32, fontWeight: FontWeight.bold, color: kInk),
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                    color: Theme.of(context).colorScheme.onSurface),
               ),
               const SizedBox(height: 8),
               Text(
                 'See the hazard. Find the safe way.',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
+                style: TextStyle(
+                    fontSize: 16,
+                    color: Theme.of(context)
+                        .colorScheme
+                        .onSurface
+                        .withOpacity(0.7)),
               ),
               const Spacer(flex: 3),
               SizedBox(
@@ -420,7 +211,7 @@ class WelcomePage extends StatelessWidget {
                       context,
                       MaterialPageRoute(
                         builder: (_) =>
-                            const HomePage(userId: 0, userName: 'Guest'),
+                            const HomePage(userId: '', userName: 'Guest'),
                       ),
                     );
                   },
@@ -434,12 +225,12 @@ class WelcomePage extends StatelessWidget {
                     MaterialPageRoute(builder: (_) => const LoginPage()),
                   );
                 },
-                child: const Text(
+                child: Text(
                   'Log in to report hazards',
                   style: TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w600,
-                      color: kPrimaryDark),
+                      color: Theme.of(context).colorScheme.primary),
                 ),
               ),
               const Spacer(),
@@ -493,26 +284,74 @@ class _LoginPageState extends State<LoginPage> {
     }
 
     setState(() => loading = true);
-    final result = await ApiService.login(email, password);
-    setState(() => loading = false);
-
-    if (!mounted) return;
-
-    if (result['status'] == 'success' && result['user'] != null) {
-      int userId = result['user']['id'];
-      if (result['token'] != null) {
-        ApiService.setToken(result['token']);
-      }
+    try {
+      final user =
+          await AuthService.instance.login(email: email, password: password);
+      if (!mounted) return;
       Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(
           builder: (_) => HomePage(
-              userId: userId, userName: result['user']['name'] ?? 'User'),
+            userId: user.uid,
+            userName: user.name ?? 'User',
+          ),
         ),
         (route) => false,
       );
-    } else {
-      setState(() => errorMessage = result['error'] ?? 'Login failed');
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() => errorMessage = e.message);
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  /// Local password reset: asks for the email + a new password and calls
+  /// the backend directly. (A fully-local stack has no email service, so
+  /// there is no emailed link — see AuthService.resetPassword.)
+  void forgotPassword() async {
+    final email = emailController.text.trim();
+    if (email.isEmpty || !email.contains('@')) {
+      setState(() => errorMessage =
+          'Enter your email above first, then tap "Forgot password?"');
+      return;
+    }
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Reset password for $email'),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          decoration: const InputDecoration(
+            labelText: 'New password',
+            hintText: 'At least 6 characters',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || result == null || result.isEmpty) return;
+    try {
+      await AuthService.instance
+          .resetPassword(email: email, newPassword: result);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Password updated — you can log in now')),
+      );
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() => errorMessage = e.message);
     }
   }
 
@@ -535,7 +374,8 @@ class _LoginPageState extends State<LoginPage> {
                   style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
               Text('Log in to report hazards near you',
-                  style: TextStyle(fontSize: 15, color: Colors.grey.shade600)),
+                  style: TextStyle(
+                      fontSize: 15, color: AppSurfaces.secondaryText(context))),
               const SizedBox(height: 28),
               if (errorMessage != null) ...[
                 _ErrorBanner(message: errorMessage!),
@@ -570,7 +410,15 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                 ),
               ),
-              const SizedBox(height: 28),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: loading ? null : forgotPassword,
+                  child: const Text('Forgot password?'),
+                ),
+              ),
+              const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -590,7 +438,7 @@ class _LoginPageState extends State<LoginPage> {
                 child: Text.rich(
                   TextSpan(
                     text: "Don't have an account? ",
-                    style: const TextStyle(color: Colors.grey),
+                    style: TextStyle(color: AppSurfaces.secondaryText(context)),
                     children: [
                       TextSpan(
                         text: 'Sign up',
@@ -602,8 +450,9 @@ class _LoginPageState extends State<LoginPage> {
                                   builder: (_) => const RegisterPage()),
                             );
                           },
-                        style: const TextStyle(
-                            color: kPrimaryDark, fontWeight: FontWeight.w700),
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.primary,
+                            fontWeight: FontWeight.w700),
                       ),
                     ],
                   ),
@@ -673,23 +522,31 @@ class _RegisterPageState extends State<RegisterPage> {
     }
 
     setState(() => loading = true);
-    final result = await ApiService.register(
-      email: email,
-      password: password,
-      name: name,
-      phone: phone,
-    );
-    setState(() => loading = false);
-
-    if (!mounted) return;
-
-    if (result['status'] == 'success') {
-      setState(
-          () => successMessage = 'Account created! Redirecting to login...');
-      await Future.delayed(const Duration(seconds: 2));
-      if (mounted) Navigator.pop(context);
-    } else {
-      setState(() => errorMessage = result['error'] ?? 'Registration failed');
+    try {
+      final user = await AuthService.instance.register(
+        email: email,
+        password: password,
+        name: name,
+        phone: phone.isEmpty ? null : phone,
+      );
+      if (!mounted) return;
+      // Register auto-logs-in (the backend returns a JWT), so go straight
+      // to Home instead of bouncing back to the login page.
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(
+          builder: (_) => HomePage(
+            userId: user.uid,
+            userName: user.name ?? name,
+          ),
+        ),
+        (route) => false,
+      );
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() => errorMessage = e.message);
+    } finally {
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -712,7 +569,8 @@ class _RegisterPageState extends State<RegisterPage> {
                   style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
               Text('Join SafeSense to report and help others',
-                  style: TextStyle(fontSize: 15, color: Colors.grey.shade600)),
+                  style: TextStyle(
+                      fontSize: 15, color: AppSurfaces.secondaryText(context))),
               const SizedBox(height: 24),
               if (errorMessage != null) ...[
                 _ErrorBanner(message: errorMessage!),
@@ -800,7 +658,7 @@ class _RegisterPageState extends State<RegisterPage> {
 // ============================================================
 
 class HomePage extends StatefulWidget {
-  final int userId;
+  final String userId;
   final String userName;
   const HomePage({super.key, required this.userId, required this.userName});
 
@@ -812,7 +670,7 @@ class _HomePageState extends State<HomePage> {
   int _currentIndex = 0;
 
   void _handleReportTap() {
-    if (widget.userId == 0) {
+    if (widget.userId.isEmpty) {
       // Guests get prompted only at the point they actually need it —
       // not blocked from anything else in the app.
       showModalBottomSheet(
@@ -833,7 +691,7 @@ class _HomePageState extends State<HomePage> {
               Text(
                 'This helps us verify reports and keep the map trustworthy.',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey.shade600),
+                style: TextStyle(color: AppSurfaces.secondaryText(context)),
               ),
               const SizedBox(height: 20),
               SizedBox(
@@ -863,7 +721,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final isGuest = widget.userId == 0;
+    final isGuest = widget.userId.isEmpty;
     final pages = <Widget>[
       DashboardPage(
           userId: widget.userId,
@@ -890,7 +748,7 @@ class _HomePageState extends State<HomePage> {
       bottomNavigationBar: BottomAppBar(
         shape: const CircularNotchedRectangle(),
         notchMargin: 8,
-        color: Colors.white,
+        color: Theme.of(context).colorScheme.surface,
         height: 74,
         padding: EdgeInsets.zero,
         child: Row(
@@ -939,7 +797,7 @@ class _HomePageState extends State<HomePage> {
 // ============================================================
 
 class DashboardPage extends StatefulWidget {
-  final int userId;
+  final String userId;
   final bool isGuest;
   final VoidCallback onReportTap;
 
@@ -967,8 +825,10 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Future<void> _loadData() async {
     setState(() => loading = true);
-    final hazards = await ApiService.getNearbyHazards(19.2456, 73.1300);
-    final shelter = await ApiService.getNearestShelter(19.2456, 73.1300);
+    final hazards = await FirestoreService.instance
+        .getNearbyHazards(19.2456, 73.1300);
+    final shelter = await FirestoreService.instance
+        .getNearestShelter(19.2456, 73.1300);
     if (mounted) {
       setState(() {
         nearbyHazards = hazards;
@@ -984,16 +844,40 @@ class _DashboardPageState extends State<DashboardPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Row(
+        title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.shield_outlined, color: kPrimary, size: 24),
-            SizedBox(width: 8),
+            const Icon(Icons.shield_outlined, color: kPrimary, size: 24),
+            const SizedBox(width: 8),
             Text('SafeSense',
                 style: TextStyle(
-                    fontWeight: FontWeight.bold, color: kPrimaryDark)),
+                    fontWeight: FontWeight.bold,
+                    color: Theme.of(context).colorScheme.onSurface)),
           ],
         ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: TextButton.icon(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => EmergencyModePage(userId: widget.userId)),
+              ),
+              icon: const Icon(Icons.sos_rounded, color: kDanger, size: 20),
+              label: const Text('SOS',
+                  style: TextStyle(
+                      color: kDanger, fontWeight: FontWeight.bold)),
+              style: TextButton.styleFrom(
+                backgroundColor: kDanger.withOpacity(0.1),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              ),
+            ),
+          ),
+        ],
       ),
       body: loading
           ? const Center(child: CircularProgressIndicator(color: kPrimary))
@@ -1050,10 +934,10 @@ class _DashboardPageState extends State<DashboardPage> {
                   ],
 
                   Text('Nearby Hazards (${nearbyHazards.length})',
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontSize: 17,
                           fontWeight: FontWeight.bold,
-                          color: kInk)),
+                          color: Theme.of(context).colorScheme.onSurface)),
                   const SizedBox(height: 10),
 
                   if (nearbyHazards.isEmpty)
@@ -1067,11 +951,11 @@ class _DashboardPageState extends State<DashboardPage> {
 
                   const SizedBox(height: 24),
 
-                  const Text('Nearest Shelter',
+                  Text('Nearest Shelter',
                       style: TextStyle(
                           fontSize: 17,
                           fontWeight: FontWeight.bold,
-                          color: kInk)),
+                          color: Theme.of(context).colorScheme.onSurface)),
                   const SizedBox(height: 10),
 
                   if (nearestShelter.isEmpty)
@@ -1105,9 +989,9 @@ class _DashboardPageState extends State<DashboardPage> {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 32),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).cardColor,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: Theme.of(context).dividerColor),
       ),
       child: Center(
         child: Column(
@@ -1115,7 +999,8 @@ class _DashboardPageState extends State<DashboardPage> {
             Icon(icon, size: 36, color: color.withOpacity(0.5)),
             const SizedBox(height: 10),
             Text(message,
-                style: TextStyle(fontSize: 14, color: Colors.grey.shade500)),
+                style: TextStyle(
+                    fontSize: 14, color: AppSurfaces.secondaryText(context))),
           ],
         ),
       ),
@@ -1202,7 +1087,7 @@ class _BigActionTile extends StatelessWidget {
       child: Container(
         height: 110,
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: Theme.of(context).cardColor,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: color.withOpacity(0.3), width: 1.5),
         ),
@@ -1238,9 +1123,9 @@ class _HazardTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).cardColor,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: AppSurfaces.border(context)),
       ),
       child: Row(
         children: [
@@ -1265,7 +1150,8 @@ class _HazardTile extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                   '${hazard['road_status'] ?? ''}  ·  $confidence% confidence',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                  style: TextStyle(
+                      fontSize: 12, color: AppSurfaces.secondaryText(context)),
                 ),
               ],
             ),
@@ -1299,9 +1185,9 @@ class _ShelterTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).cardColor,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: AppSurfaces.border(context)),
       ),
       child: Row(
         children: [
@@ -1325,8 +1211,9 @@ class _ShelterTile extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                     '${(shelter['distance_km'] ?? 0).toStringAsFixed(1)} km away',
-                    style:
-                        TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: AppSurfaces.secondaryText(context))),
               ],
             ),
           ),
@@ -1431,7 +1318,7 @@ class _SuccessBanner extends StatelessWidget {
 // ============================================================
 
 class UploadPage extends StatefulWidget {
-  final int userId;
+  final String userId;
   const UploadPage({super.key, required this.userId});
 
   @override
@@ -1545,7 +1432,7 @@ class _UploadPageState extends State<UploadPage> {
 
     setState(() => loading = true);
 
-    final result = await ApiService.uploadReport(
+    final result = await FirestoreService.instance.uploadReport(
       imageBytes: _imageBytes!,
       fileName: selectedImage!.name,
       latitude: _lat!,
@@ -1607,7 +1494,7 @@ class _UploadPageState extends State<UploadPage> {
                       child: Container(
                         width: double.infinity,
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          color: Theme.of(context).cardColor,
                           borderRadius: BorderRadius.circular(16),
                           border: Border.all(
                               color: kPrimary.withOpacity(0.3), width: 2),
@@ -1625,11 +1512,13 @@ class _UploadPageState extends State<UploadPage> {
                                   size: 40, color: kPrimary),
                             ),
                             const SizedBox(height: 16),
-                            const Text('Tap to add a photo',
+                            Text('Tap to add a photo',
                                 style: TextStyle(
                                     fontSize: 17,
                                     fontWeight: FontWeight.w700,
-                                    color: Colors.black87)),
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurface)),
                             const SizedBox(height: 6),
                             Text(
                                 'This is the only thing we need to get started',
@@ -1848,9 +1737,9 @@ class ResultPage extends StatelessWidget {
               width: double.infinity,
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: Theme.of(context).cardColor,
                 borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.grey.shade200),
+                border: Border.all(color: AppSurfaces.border(context)),
               ),
               child: Column(
                 children: [
@@ -1948,7 +1837,7 @@ class ResultPage extends StatelessWidget {
 // ============================================================
 
 class MapPage extends StatefulWidget {
-  final int userId;
+  final String userId;
   const MapPage({super.key, required this.userId});
 
   @override
@@ -1958,7 +1847,15 @@ class MapPage extends StatefulWidget {
 class _MapPageState extends State<MapPage> {
   List<dynamic> hazards = [];
   List<dynamic> shelters = [];
+  List<dynamic> riskZones = [];
   bool loading = true;
+  bool showRiskZones = true;
+
+  List<LatLng>? _evacuationRoute;
+  String? _evacuationShelterName;
+  double? _evacuationDistanceKm;
+  bool _loadingEvacuation = false;
+  EvacuationRoute? _evacuationDetails;
 
   @override
   void initState() {
@@ -1968,31 +1865,81 @@ class _MapPageState extends State<MapPage> {
 
   Future<void> _loadData() async {
     setState(() => loading = true);
-    final h = await ApiService.getHazards();
-    final s = await _fetchShelters();
+    final h = await FirestoreService.instance.getHazards();
+    final s = await FirestoreService.instance.getShelters();
+    final z = await FirestoreService.instance.getRiskZones();
     if (mounted) {
       setState(() {
         hazards = h;
         shelters = s;
+        riskZones = z;
         loading = false;
       });
     }
   }
 
-  Future<List<dynamic>> _fetchShelters() async {
+  Future<void> _findEvacuationRoute() async {
+    if (shelters.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No shelter data available yet')),
+      );
+      return;
+    }
+    setState(() => _loadingEvacuation = true);
     try {
-      final response = await http
-          .get(Uri.parse('${ApiService.baseUrl}/api/shelters'))
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['shelters'] as List<dynamic>? ?? [];
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        await Geolocator.requestPermission();
       }
-      return [];
+      final pos = await Geolocator.getCurrentPosition();
+      final nearest = await FirestoreService.instance
+          .getNearestShelter(pos.latitude, pos.longitude);
+      if (nearest.isEmpty) {
+        if (mounted) setState(() => _loadingEvacuation = false);
+        return;
+      }
+
+      // Real street routing (Dijkstra via OSRM) + risk-zone crossing
+      // check; falls back to a straight line when offline.
+      final route = await RoutingService.instance.walkingRoute(
+        from: LatLng(pos.latitude, pos.longitude),
+        to: LatLng((nearest['latitude'] as num).toDouble(),
+            (nearest['longitude'] as num).toDouble()),
+        riskZones: riskZones.cast<Map<String, dynamic>>(),
+      );
+
+      if (mounted) {
+        setState(() {
+          _evacuationRoute = route.points;
+          _evacuationShelterName = nearest['name'];
+          _evacuationDistanceKm = route.distanceKm;
+          _evacuationDetails = route;
+          _loadingEvacuation = false;
+        });
+      }
     } catch (e) {
-      return [];
+      if (mounted) {
+        setState(() => _loadingEvacuation = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not get your location: $e')),
+        );
+      }
     }
   }
+
+  Color _riskColor(String? level) {
+    switch (level) {
+      case 'high':
+        return kDanger;
+      case 'moderate':
+        return kWarning;
+      default:
+        return kSafe;
+    }
+  }
+
+  // _fetchShelters (Flask /api/shelters) removed — shelters now come from
+  // FirestoreService.getShelters() (see _loadData above).
 
   @override
   Widget build(BuildContext context) {
@@ -2001,6 +1948,14 @@ class _MapPageState extends State<MapPage> {
         title: const Text('Hazard Map',
             style: TextStyle(fontWeight: FontWeight.w600)),
         actions: [
+          IconButton(
+            icon: Icon(showRiskZones
+                ? Icons.layers
+                : Icons.layers_clear_outlined),
+            tooltip: 'Toggle risk zones',
+            onPressed: () =>
+                setState(() => showRiskZones = !showRiskZones),
+          ),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _loadData)
         ],
       ),
@@ -2017,6 +1972,32 @@ class _MapPageState extends State<MapPage> {
                           'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                       userAgentPackageName: 'com.safesense.app',
                     ),
+                    if (showRiskZones && riskZones.isNotEmpty)
+                      PolygonLayer(
+                        polygons: riskZones
+                            .where((z) =>
+                                (z['points'] as List<LatLng>).length >= 3)
+                            .map((z) {
+                          final color =
+                              _riskColor(z['riskLevel'] as String?);
+                          return Polygon(
+                            points: z['points'] as List<LatLng>,
+                            color: color.withOpacity(0.25),
+                            borderColor: color,
+                            borderStrokeWidth: 2,
+                          );
+                        }).toList(),
+                      ),
+                    if (_evacuationRoute != null)
+                      PolylineLayer(
+                        polylines: [
+                          Polyline(
+                            points: _evacuationRoute!,
+                            color: kSafe,
+                            strokeWidth: 4,
+                          ),
+                        ],
+                      ),
                     MarkerLayer(
                       markers: [
                         ...hazards.map(
@@ -2087,11 +2068,11 @@ class _MapPageState extends State<MapPage> {
                     padding: const EdgeInsets.symmetric(
                         horizontal: 20, vertical: 14),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: Theme.of(context).colorScheme.surface,
                       borderRadius: BorderRadius.circular(14),
                       boxShadow: [
                         BoxShadow(
-                            color: Colors.black.withOpacity(0.08),
+                            color: Colors.black.withOpacity(0.18),
                             blurRadius: 10,
                             offset: const Offset(0, 2))
                       ],
@@ -2101,7 +2082,84 @@ class _MapPageState extends State<MapPage> {
                       children: [
                         _legendItem(kDanger, 'Hazard'),
                         _legendItem(kPrimary, 'Shelter'),
+                        if (showRiskZones && riskZones.isNotEmpty)
+                          _legendItem(kWarning, 'Risk zone'),
                       ],
+                    ),
+                  ),
+                ),
+                if (_evacuationRoute != null)
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom: 76,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: (_evacuationDetails?.crossesZones.isNotEmpty ??
+                                false)
+                            ? kWarning.withOpacity(0.95)
+                            : kSafe.withOpacity(0.95),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Route to $_evacuationShelterName'
+                            '${_evacuationDistanceKm != null ? ' (${_evacuationDistanceKm!.toStringAsFixed(1)} km'
+                                '${_evacuationDetails == null ? '' : ', ~${_evacuationDetails!.durationMin.round()} min walk'})' : ''}',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _evacuationDetails?.note ??
+                                'Check road conditions yourself.',
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 11),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                Positioned(
+                  top: 12,
+                  left: 12,
+                  child: Material(
+                    color: kSafe,
+                    borderRadius: BorderRadius.circular(20),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(20),
+                      onTap: _loadingEvacuation ? null : _findEvacuationRoute,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _loadingEvacuation
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2, color: Colors.white),
+                                  )
+                                : const Icon(Icons.directions_run,
+                                    size: 16, color: Colors.white),
+                            const SizedBox(width: 6),
+                            const Text('Evacuate',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13)),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -2112,20 +2170,20 @@ class _MapPageState extends State<MapPage> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: Theme.of(context).colorScheme.surface,
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                            color: Colors.black.withOpacity(0.08),
+                            color: Colors.black.withOpacity(0.18),
                             blurRadius: 8)
                       ],
                     ),
                     child: Text(
                       '${hazards.length} hazard${hazards.length == 1 ? '' : 's'} · ${shelters.length} shelter${shelters.length == 1 ? '' : 's'}',
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
-                          color: Colors.black87),
+                          color: Theme.of(context).colorScheme.onSurface),
                     ),
                   ),
                 ),
@@ -2144,9 +2202,9 @@ class _MapPageState extends State<MapPage> {
             decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
         const SizedBox(width: 6),
         Text(label,
-            style: const TextStyle(
+            style: TextStyle(
                 fontSize: 13,
-                color: Colors.black54,
+                color: Theme.of(context).colorScheme.onSurface.withOpacity(0.75),
                 fontWeight: FontWeight.w500)),
       ],
     );
@@ -2162,16 +2220,16 @@ class _MapPageState extends State<MapPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
+          children: [            Center(
               child: Container(
                   width: 40,
                   height: 4,
                   decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
+                      color: Colors.grey.shade600,
                       borderRadius: BorderRadius.circular(2))),
             ),
             const SizedBox(height: 16),
+
             Text(
                 '${(hazard['damage_type'] ?? 'Unknown').toString().toUpperCase()}',
                 style:
@@ -2249,7 +2307,9 @@ class _MapPageState extends State<MapPage> {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label,
-              style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
+              style: TextStyle(
+                  fontSize: 14,
+                  color: AppSurfaces.secondaryText(context))),
           Text(value,
               style:
                   const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
@@ -2264,7 +2324,7 @@ class _MapPageState extends State<MapPage> {
 // ============================================================
 
 class ProfilePage extends StatefulWidget {
-  final int userId;
+  final String userId;
   final String userName;
   const ProfilePage({super.key, required this.userId, required this.userName});
 
@@ -2275,19 +2335,26 @@ class ProfilePage extends StatefulWidget {
 class _ProfilePageState extends State<ProfilePage> {
   int reportCount = 0;
   bool loadingCount = true;
+  bool isAdmin = false;
 
   @override
   void initState() {
     super.initState();
     _loadReportCount();
+    _checkAdmin();
+  }
+
+  Future<void> _checkAdmin() async {
+    final admin = await AuthService.instance.isAdmin();
+    if (mounted) setState(() => isAdmin = admin);
   }
 
   Future<void> _loadReportCount() async {
-    if (widget.userId == 0) {
+    if (widget.userId.isEmpty) {
       setState(() => loadingCount = false);
       return;
     }
-    final count = await ApiService.getUserReportCount(widget.userId);
+    final count = await FirestoreService.instance.getUserReportCount(widget.userId);
     if (mounted) {
       setState(() {
         reportCount = count;
@@ -2298,7 +2365,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
   @override
   Widget build(BuildContext context) {
-    final isGuest = widget.userId == 0;
+    final isGuest = widget.userId.isEmpty;
 
     return Scaffold(
       appBar: AppBar(
@@ -2310,9 +2377,9 @@ class _ProfilePageState extends State<ProfilePage> {
           Container(
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
-              color: Colors.white,
+              color: Theme.of(context).cardColor,
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.grey.shade200),
+              border: Border.all(color: Theme.of(context).dividerColor),
             ),
             child: Row(
               children: [
@@ -2346,7 +2413,9 @@ class _ProfilePageState extends State<ProfilePage> {
                           style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.w600,
-                              color: isGuest ? Colors.grey : kPrimaryDark),
+                              color: isGuest
+                                  ? Colors.grey
+                                  : Theme.of(context).colorScheme.onSurface),
                         ),
                       ),
                     ],
@@ -2375,47 +2444,172 @@ class _ProfilePageState extends State<ProfilePage> {
             const Text('Statistics',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: Colors.grey.shade200),
+            InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => ReportHistoryPage(userId: widget.userId)),
               ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                        color: kPrimaryLight.withOpacity(0.4),
-                        borderRadius: BorderRadius.circular(10)),
-                    child: const Icon(Icons.description_outlined,
-                        color: kPrimary, size: 22),
-                  ),
-                  const SizedBox(width: 14),
-                  const Expanded(
-                      child: Text('Reports Submitted',
-                          style: TextStyle(fontWeight: FontWeight.w500))),
-                  loadingCount
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : Text('$reportCount',
-                          style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                              color: kPrimary)),
-                ],
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).cardColor,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                          color: kPrimaryLight.withOpacity(0.4),
+                          borderRadius: BorderRadius.circular(10)),
+                      child: const Icon(Icons.description_outlined,
+                          color: kPrimary, size: 22),
+                    ),
+                    const SizedBox(width: 14),
+                    const Expanded(
+                        child: Text('Reports Submitted',
+                            style: TextStyle(fontWeight: FontWeight.w500))),
+                    loadingCount
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : Text('$reportCount',
+                            style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: kPrimary)),
+                    const SizedBox(width: 6),
+                    Icon(Icons.chevron_right, color: Colors.grey.shade400),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 32),
-            SizedBox(
+            const SizedBox(height: 12),
+            InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) =>
+                        EmergencyContactsPage(userId: widget.userId)),
+              ),
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).cardColor,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                          color: kDanger.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(10)),
+                      child: const Icon(Icons.contacts,
+                          color: kDanger, size: 22),
+                    ),
+                    const SizedBox(width: 14),
+                    const Expanded(
+                        child: Text('Emergency Contacts',
+                            style: TextStyle(fontWeight: FontWeight.w500))),
+                    Icon(Icons.chevron_right, color: Colors.grey.shade400),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsPage()),
+              ),
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).cardColor,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurface
+                              .withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(10)),
+                      child: Icon(Icons.settings_outlined,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurface
+                              .withOpacity(0.7),
+                          size: 22),
+                    ),
+                    const SizedBox(width: 14),
+                    const Expanded(
+                        child: Text('Settings',
+                            style: TextStyle(fontWeight: FontWeight.w500))),
+                    Icon(Icons.chevron_right, color: Colors.grey.shade400),
+                  ],
+                ),
+              ),
+            ),
+            if (isAdmin) ...[
+              const SizedBox(height: 12),
+              InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const AdminDashboardPage()),
+                ),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.onSurface.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: kPrimaryDark.withOpacity(0.2)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                            color: kPrimaryDark.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(10)),
+                        child: Icon(Icons.admin_panel_settings,
+                            color: Theme.of(context).colorScheme.onSurface,
+                            size: 22),
+                      ),
+                      const SizedBox(width: 14),
+                      const Expanded(
+                          child: Text('Admin Dashboard',
+                              style: TextStyle(fontWeight: FontWeight.w600))),
+                      Icon(Icons.chevron_right, color: Colors.grey.shade400),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 32),              SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: () {
-                  ApiService.logout();
+                onPressed: () async {
+                  await AuthService.instance.logout();
+                  if (!context.mounted) return;
                   Navigator.pushAndRemoveUntil(
                     context,
                     MaterialPageRoute(builder: (_) => const WelcomePage()),
