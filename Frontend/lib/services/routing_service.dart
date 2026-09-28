@@ -39,9 +39,10 @@ class RoutingService {
   /// [points]     — polyline to draw (street-following, or the 2-point
   ///                straight line when [usedFallback]).
   /// [distanceKm] — real travel distance along the route.
-  /// [durationMin]— estimated walking time (OSRM assumes car speed, so we
-  ///                recompute at ~5 km/h when the route came from the
-  ///                walking profile fallback below).
+  /// [durationMin]— estimated walking time at ~5 km/h from the route's
+  ///                real distance (the public OSRM demo reports driving
+  ///                durations even on the foot profile, so OSRM's own
+  ///                duration field is deliberately ignored).
   /// [crossesZones] — human-readable list of risk zones the route passes
   ///                through, empty when the route stays clean.
   /// [usedFallback] — true when OSRM was unreachable and we returned a
@@ -75,10 +76,11 @@ class RoutingService {
           .toList();
 
       final distanceKm = (route['distance'] as num).toDouble() / 1000.0;
-      // OSRM's duration is for the profile requested; 'foot' estimates
-      // walking speed. Keep it, but sanity-clamp absurd values.
-      final durationMin = ((route['duration'] as num).toDouble() / 60.0)
-          .clamp(0.0, 24 * 60.0);
+      // The public OSRM demo doesn't load a true foot profile — 'foot'
+      // requests come back with driving durations (verified: 7.8 km in
+      // "7 min"). Ignore OSRM's duration entirely and compute honest
+      // walking time at ~5 km/h.
+      final durationMin = distanceKm / 5.0 * 60.0;
 
       final crossed = _zonesCrossed(coords, riskZones);
 
