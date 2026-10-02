@@ -35,8 +35,8 @@ class EmergencyModePage extends StatefulWidget {
 }
 
 class _EmergencyModePageState extends State<EmergencyModePage> {
-  Position? _position;
   bool _loadingLocation = true;
+  bool _locationUnavailable = false;
   List<dynamic> _nearestShelters = [];
   bool _sharing = false;
   String? _shareId;
@@ -65,22 +65,41 @@ class _EmergencyModePageState extends State<EmergencyModePage> {
 
   Future<void> _loadLocationAndShelters() async {
     setState(() => _loadingLocation = true);
+    // Resolve a position, falling back to the city centre (the same default
+    // the dashboard uses) so the shelters section still works when the
+    // browser blocks geolocation — e.g. laptop web with permission denied.
+    double lat;
+    double lng;
+    bool located = true;
     try {
       final permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         await Geolocator.requestPermission();
       }
       final pos = await Geolocator.getCurrentPosition();
+      lat = pos.latitude;
+      lng = pos.longitude;
+    } catch (_) {
+      lat = 19.2456;
+      lng = 73.1300;
+      located = false;
+    }
+    try {
       final shelters = await FirestoreService.instance.getShelters();
-      shelters.sort((a, b) {
-        final da = _distanceKm(pos, a);
-        final db = _distanceKm(pos, b);
-        return da.compareTo(db);
-      });
+      shelters.sort((a, b) =>
+          _distanceKm(lat, lng, a).compareTo(_distanceKm(lat, lng, b)));
       if (mounted) {
         setState(() {
-          _position = pos;
-          _nearestShelters = shelters.take(3).toList();
+          _locationUnavailable = !located;
+          // Attach the client-computed haversine distance to each shelter.
+          // The plain /shelters list endpoint does not include distance_km
+          // (only /shelters/nearest and /shelters/nearby do), so without
+          // this the subtitle cast used to crash on a null.
+          _nearestShelters = shelters.take(3).map((s) {
+            final d = _distanceKm(lat, lng, s);
+            if (d.isFinite) s['distance_km'] = d;
+            return s;
+          }).toList();
           _loadingLocation = false;
         });
       }
@@ -89,14 +108,15 @@ class _EmergencyModePageState extends State<EmergencyModePage> {
     }
   }
 
-  double _distanceKm(Position pos, dynamic shelter) {
+  double _distanceKm(double fromLat, double fromLng, dynamic shelter) {
+    final lat2 = (shelter['latitude'] as num?)?.toDouble();
+    final lng2 = (shelter['longitude'] as num?)?.toDouble();
+    if (lat2 == null || lng2 == null) return double.infinity;
     const r = 6371.0;
-    final lat2 = (shelter['latitude'] as num).toDouble();
-    final lng2 = (shelter['longitude'] as num).toDouble();
-    final dLat = (lat2 - pos.latitude) * math.pi / 180;
-    final dLon = (lng2 - pos.longitude) * math.pi / 180;
+    final dLat = (lat2 - fromLat) * math.pi / 180;
+    final dLon = (lng2 - fromLng) * math.pi / 180;
     final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(pos.latitude * math.pi / 180) *
+        math.cos(fromLat * math.pi / 180) *
             math.cos(lat2 * math.pi / 180) *
             math.sin(dLon / 2) *
             math.sin(dLon / 2);
@@ -215,6 +235,16 @@ class _EmergencyModePageState extends State<EmergencyModePage> {
 
             const SizedBox(height: 24),
             _sectionTitle('Nearest Shelters', Icons.home_work),
+            if (_locationUnavailable)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'Location unavailable — showing shelters nearest to the city centre',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: AppSurfaces.secondaryText(context)),
+                ),
+              ),
             if (_loadingLocation)
               const Padding(
                 padding: EdgeInsets.all(16),
@@ -229,7 +259,7 @@ class _EmergencyModePageState extends State<EmergencyModePage> {
                       leading: const Icon(Icons.home_work, color: kPrimary),
                       title: Text(s['name'] ?? 'Shelter'),
                       subtitle: Text(
-                          '${(s['distance_km'] as double).toStringAsFixed(1)} km away · ${s['status']}'),
+                          '${s['distance_km'] == null ? 'Distance unknown' : '${(s['distance_km'] as num).toDouble().toStringAsFixed(1)} km away'} · ${s['status'] ?? 'unknown'}'),
                       trailing: s['contact'] != null && s['contact'] != 'N/A'
                           ? IconButton(
                               icon: const Icon(Icons.call, color: kSafe),
